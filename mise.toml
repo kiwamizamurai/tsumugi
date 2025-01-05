@@ -1,0 +1,17 @@
+[tools]
+rust = "1.82.0"
+
+[tasks.build]
+run = ["cargo build"]
+
+[tasks.fmt]
+run = ["cargo fmt --all"]
+
+[tasks.lint]
+run = [
+    "cargo clippy -- -D warnings",
+    "cargo fmt --all -- --check"
+]
+
+[tasks.test]
+run = ["cargo test --verbose"]
