@@ -1,0 +1,23 @@
+[package]
+name = "tsumugi"
+version = "0.1.0"
+edition = "2021"
+authors = ["kiwamizamurai"]
+description = "Tsumugi - A lightweight and simple workflow engine for Rust that elegantly weaves tasks together"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kiwamizamurai/tsumugi"
+documentation = "https://docs.rs/tsumugi"
+readme = "README.md"
+keywords = ["workflow", "pipeline", "async", "simple", "lightweight"]
+categories = ["asynchronous", "development-tools"]
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
