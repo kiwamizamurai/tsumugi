@@ -9,12 +9,24 @@ A lightweight workflow engine for Rust. The name "Tsumugi" (紡) means "to spin"
 
 ## Features
 
+- **Lightweight**: Minimal dependencies, fast compilation
+- **Heterogeneous Context**: Store any type directly without wrapper enums
 - **Type-safe**: `StepName` and `ContextKey` newtypes prevent typos at compile time
 - **Async First**: Built with `async-trait` for asynchronous workflows
 - **Retry Support**: Fixed delay and exponential backoff policies
-- **Configurable Timeouts**: Per-step timeout settings (default: 30s)
+- **Configurable Timeouts**: Per-step timeout settings
+- **Minimal Core**: `tsumugi-core` has zero runtime dependencies (no tokio)
 - **Error Handling**: Structured errors with `thiserror`, lifecycle hooks
-- **Lightweight**: Minimal dependencies
+
+## Architecture
+
+```
+tsumugi/
+├── tsumugi-core    # Core traits & types (no tokio dependency)
+└── tsumugi         # Workflow engine (tokio runtime)
+```
+
+This split allows library authors to implement `Step` without pulling in tokio.
 
 ## Installation
 
@@ -31,38 +43,117 @@ tokio = { version = "1", features = ["full"] }
 use tsumugi::prelude::*;
 use async_trait::async_trait;
 
-define_step!(HelloStep);
+#[derive(Debug)]
+struct HelloStep;
 
 #[async_trait]
-impl Step<String> for HelloStep {
-    async fn execute(&self, ctx: &mut Context<String>) -> Result<Option<StepName>, WorkflowError> {
+impl Step for HelloStep {
+    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
         ctx.insert("message", "Hello, World!".to_string());
-        Ok(None)
+        Ok(StepOutput::done())
+    }
+
+    fn name(&self) -> StepName {
+        StepName::new("HelloStep")
     }
 }
 
 #[tokio::main]
 async fn main() {
     let workflow = Workflow::builder()
-        .add::<HelloStep>()
-        .start_with_type::<HelloStep>()
+        .add_step("hello", HelloStep)
+        .start_with("hello")
         .build()
         .expect("valid workflow");
 
     let mut ctx = Context::new();
     workflow.execute(&mut ctx).await.expect("workflow failed");
 
-    println!("{}", ctx.get("message").unwrap());
+    // Retrieve typed data from context
+    let message: &String = ctx.get("message").unwrap();
+    println!("{}", message);
+}
+```
+
+## Heterogeneous Context
+
+The context can store any type that implements `Send + Sync + 'static`:
+
+```rust
+// Store different types directly - no wrapper enum needed!
+ctx.insert("user_id", 123u64);
+ctx.insert("name", "Alice".to_string());
+ctx.insert("scores", vec![85.5, 92.0, 78.3]);
+ctx.insert("config", MyCustomConfig { ... });
+
+// Retrieve with type inference
+let id: &u64 = ctx.get("user_id").unwrap();
+let name: &String = ctx.get("name").unwrap();
+```
+
+## Step Output
+
+Steps return `StepOutput` to control workflow flow:
+
+```rust
+async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    // Continue to next step
+    Ok(StepOutput::next("next_step"))
+
+    // Or complete the workflow
+    Ok(StepOutput::done())
+}
+```
+
+## Optional Traits
+
+Extend step behavior with optional traits:
+
+```rust
+// Retry support
+impl Retryable for MyStep {
+    fn retry_policy(&self) -> RetryPolicy {
+        RetryPolicy::exponential_backoff(3, Duration::from_millis(100), 2.0)
+    }
+}
+
+// Lifecycle hooks
+#[async_trait]
+impl WithHooks for MyStep {
+    async fn on_success(&self, ctx: &mut Context) -> Result<(), WorkflowError> {
+        println!("Step completed!");
+        Ok(())
+    }
+
+    async fn on_failure(&self, ctx: &mut Context, error: &WorkflowError) -> Result<(), WorkflowError> {
+        eprintln!("Step failed: {:?}", error);
+        Ok(())
+    }
+}
+
+// Custom timeout
+impl WithTimeout for MyStep {
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(60)
+    }
 }
 ```
 
 ## Examples
 
-See the [examples](examples/) directory:
+See the [examples](crates/tsumugi/examples/) directory:
 
-- [simple_workflow.rs](examples/simple_workflow.rs) - Basic single-step workflow
-- [order_workflow.rs](examples/order_workflow.rs) - Multi-step workflow with branching
-- [user_scoring_workflow.rs](examples/user_scoring_workflow.rs) - Data processing pipeline
+- [simple_workflow.rs](crates/tsumugi/examples/simple_workflow.rs) - Basic single-step workflow
+- [order_workflow.rs](crates/tsumugi/examples/order_workflow.rs) - Multi-step workflow with branching
+- [user_scoring_workflow.rs](crates/tsumugi/examples/user_scoring_workflow.rs) - Data processing pipeline
+
+Run examples:
+
+```bash
+cargo run -p tsumugi --example simple_workflow
+cargo run -p tsumugi --example order_workflow
+cargo run -p tsumugi --example user_scoring_workflow
+```
 
 ## Documentation
 

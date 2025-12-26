@@ -1,0 +1,22 @@
+[package]
+name = "tsumugi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A lightweight workflow engine for Rust"
+
+[dependencies]
+tsumugi-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio-test = "0.4"
+async-trait = { workspace = true }
+tracing-subscriber = "0.3"
+
+[lints]
+workspace = true
