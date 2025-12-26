@@ -2,13 +2,14 @@
 name = "tsumugi"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75.0"
 authors = ["kiwamizamurai"]
-description = "Tsumugi - A lightweight and simple workflow engine for Rust that elegantly weaves tasks together"
+description = "A lightweight workflow engine for Rust"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/kiwamizamurai/tsumugi"
 documentation = "https://docs.rs/tsumugi"
 readme = "README.md"
-keywords = ["workflow", "pipeline", "async", "simple", "lightweight"]
+keywords = ["workflow", "pipeline", "async", "task", "engine"]
 categories = ["asynchronous", "development-tools"]
 
 [dependencies]
@@ -21,3 +22,12 @@ serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
