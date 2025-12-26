@@ -32,7 +32,7 @@ impl Step<WorkflowData> for UserDataLoadStep {
     async fn execute(
         &self,
         ctx: &mut Context<WorkflowData>,
-    ) -> Result<Option<String>, WorkflowError> {
+    ) -> Result<Option<StepName>, WorkflowError> {
         println!("Loading user data...");
         // Simulate loading from database
         let user = UserData {
@@ -41,7 +41,7 @@ impl Step<WorkflowData> for UserDataLoadStep {
             age: 30,
         };
         ctx.insert("user_data", WorkflowData::User(user));
-        Ok(Some("AdditionalDataLoadStep".to_string()))
+        Ok(Some(StepName::new("AdditionalDataLoadStep")))
     }
 }
 
@@ -53,12 +53,12 @@ impl Step<WorkflowData> for AdditionalDataLoadStep {
     async fn execute(
         &self,
         ctx: &mut Context<WorkflowData>,
-    ) -> Result<Option<String>, WorkflowError> {
+    ) -> Result<Option<StepName>, WorkflowError> {
         println!("Loading additional data...");
         // Simulate loading from external API
         let scores = HashMap::from([(1, 85.5), (2, 92.0), (3, 78.3)]);
         ctx.insert("scores", WorkflowData::Scores(scores));
-        Ok(Some("DataValidationStep".to_string()))
+        Ok(Some(StepName::new("DataValidationStep")))
     }
 }
 
@@ -70,7 +70,7 @@ impl Step<WorkflowData> for DataValidationStep {
     async fn execute(
         &self,
         ctx: &mut Context<WorkflowData>,
-    ) -> Result<Option<String>, WorkflowError> {
+    ) -> Result<Option<StepName>, WorkflowError> {
         println!("Validating data...");
 
         let user = match ctx.get("user_data") {
@@ -107,7 +107,7 @@ impl Step<WorkflowData> for DataValidationStep {
             });
         }
 
-        Ok(Some("DataProcessingStep".to_string()))
+        Ok(Some(StepName::new("DataProcessingStep")))
     }
 }
 
@@ -119,7 +119,7 @@ impl Step<WorkflowData> for DataProcessingStep {
     async fn execute(
         &self,
         ctx: &mut Context<WorkflowData>,
-    ) -> Result<Option<String>, WorkflowError> {
+    ) -> Result<Option<StepName>, WorkflowError> {
         println!("Processing data...");
 
         let user = match ctx.get("user_data") {
@@ -163,7 +163,7 @@ impl Step<WorkflowData> for DataProcessingStep {
         };
 
         ctx.insert("processed_data", WorkflowData::Processed(processed));
-        Ok(Some("NotificationStep".to_string()))
+        Ok(Some(StepName::new("NotificationStep")))
     }
 }
 
@@ -175,7 +175,7 @@ impl Step<WorkflowData> for NotificationStep {
     async fn execute(
         &self,
         ctx: &mut Context<WorkflowData>,
-    ) -> Result<Option<String>, WorkflowError> {
+    ) -> Result<Option<StepName>, WorkflowError> {
         let processed = match ctx.get("processed_data") {
             Some(WorkflowData::Processed(processed)) => processed,
             _ => {

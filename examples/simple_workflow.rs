@@ -5,7 +5,7 @@ define_step!(DataLoadStep);
 
 #[async_trait]
 impl Step<String> for DataLoadStep {
-    async fn execute(&self, ctx: &mut Context<String>) -> Result<Option<String>, WorkflowError> {
+    async fn execute(&self, ctx: &mut Context<String>) -> Result<Option<StepName>, WorkflowError> {
         println!("Loading data...");
         ctx.insert("data", "sample data".to_string());
         Ok(None)

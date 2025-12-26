@@ -48,6 +48,7 @@ struct BankInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum WorkflowData {
     Order(Order),
     InventoryStatus(HashMap<String, u32>),
@@ -56,6 +57,7 @@ enum WorkflowData {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PaymentStatus {
     transaction_id: String,
     status: String,
@@ -75,7 +77,7 @@ impl Step<WorkflowData> for OrderValidationStep {
     async fn execute(
         &self,
         ctx: &mut Context<WorkflowData>,
-    ) -> Result<Option<String>, WorkflowError> {
+    ) -> Result<Option<StepName>, WorkflowError> {
         println!("Validating order...");
 
         let order = match ctx.get("order") {
@@ -103,7 +105,7 @@ impl Step<WorkflowData> for OrderValidationStep {
             });
         }
 
-        Ok(Some("check_inventory".to_string()))
+        Ok(Some(StepName::new("InventoryCheckStep")))
     }
 }
 
@@ -115,7 +117,7 @@ impl Step<WorkflowData> for InventoryCheckStep {
     async fn execute(
         &self,
         ctx: &mut Context<WorkflowData>,
-    ) -> Result<Option<String>, WorkflowError> {
+    ) -> Result<Option<StepName>, WorkflowError> {
         let order = match ctx.get("order") {
             Some(WorkflowData::Order(order)) => order,
             _ => {
@@ -146,11 +148,11 @@ impl Step<WorkflowData> for InventoryCheckStep {
                 })?;
 
             if available < &item.quantity {
-                return Ok(Some("pending_notification".to_string()));
+                return Ok(Some(StepName::new("PendingNotificationStep")));
             }
         }
 
-        Ok(Some("payment_processing".to_string()))
+        Ok(Some(StepName::new("PaymentProcessingStep")))
     }
 }
 
@@ -162,7 +164,7 @@ impl Step<WorkflowData> for PaymentProcessingStep {
     async fn execute(
         &self,
         ctx: &mut Context<WorkflowData>,
-    ) -> Result<Option<String>, WorkflowError> {
+    ) -> Result<Option<StepName>, WorkflowError> {
         println!("Processing payment...");
 
         let order = match ctx.get("order") {
@@ -193,8 +195,8 @@ impl Step<WorkflowData> for PaymentProcessingStep {
         );
 
         match &order.payment_method {
-            PaymentMethod::CreditCard(_) => Ok(Some("ShippingArrangementStep".to_string())),
-            PaymentMethod::BankTransfer(_) => Ok(Some("PendingNotificationStep".to_string())),
+            PaymentMethod::CreditCard(_) => Ok(Some(StepName::new("ShippingArrangementStep"))),
+            PaymentMethod::BankTransfer(_) => Ok(Some(StepName::new("PendingNotificationStep"))),
         }
     }
 }
@@ -207,7 +209,7 @@ impl Step<WorkflowData> for ShippingArrangementStep {
     async fn execute(
         &self,
         ctx: &mut Context<WorkflowData>,
-    ) -> Result<Option<String>, WorkflowError> {
+    ) -> Result<Option<StepName>, WorkflowError> {
         println!("Arranging shipping...");
 
         let order = match ctx.get("order") {
@@ -227,7 +229,7 @@ impl Step<WorkflowData> for ShippingArrangementStep {
         };
 
         ctx.insert("shipping_info", WorkflowData::ShippingInfo(shipping_info));
-        Ok(Some("SuccessNotificationStep".to_string()))
+        Ok(Some(StepName::new("SuccessNotificationStep")))
     }
 }
 
@@ -239,7 +241,7 @@ impl Step<WorkflowData> for SuccessNotificationStep {
     async fn execute(
         &self,
         ctx: &mut Context<WorkflowData>,
-    ) -> Result<Option<String>, WorkflowError> {
+    ) -> Result<Option<StepName>, WorkflowError> {
         println!("Sending success notification...");
 
         let order = match ctx.get("order") {
@@ -279,7 +281,7 @@ impl Step<WorkflowData> for PendingNotificationStep {
     async fn execute(
         &self,
         ctx: &mut Context<WorkflowData>,
-    ) -> Result<Option<String>, WorkflowError> {
+    ) -> Result<Option<StepName>, WorkflowError> {
         println!("Sending pending payment notification...");
 
         let order = match ctx.get("order") {
