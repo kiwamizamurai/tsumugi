@@ -2,94 +2,85 @@
 
 [![Crates.io](https://img.shields.io/crates/v/tsumugi.svg)](https://crates.io/crates/tsumugi)
 [![Documentation](https://docs.rs/tsumugi/badge.svg)](https://docs.rs/tsumugi)
+[![CI](https://github.com/kiwamizamurai/tsumugi/actions/workflows/ci.yml/badge.svg)](https://github.com/kiwamizamurai/tsumugi/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/tsumugi.svg)](LICENSE)
 
-A lightweight and simple workflow engine for Rust, designed for building type-safe and maintainable workflows. The name "Tsumugi" (紡) means "to spin" or "to weave" in Japanese, representing how this engine elegantly weaves together different tasks into a robust workflow.
+A lightweight workflow engine for Rust. The name "Tsumugi" (紡) means "to spin" or "to weave" in Japanese.
 
 ## Features
 
-- 🪶 **Lightweight**: Minimal dependencies, focused on core workflow functionality
-- 🎯 **Type-safe**: Generic type system for workflow data
-- ⚡ **Async First**: Built with async-trait for asynchronous workflows
-- 🛠️ **Configurable**: Per-step timeout settings (default: 30s)
-- 📊 **Context Aware**: Type-safe context for data sharing between steps
-- 🔄 **Error Handling**: Built-in timeout handling and error hooks
-- 🔍 **Tracing**: Basic execution logging and step tracking
+- **Type-safe**: `StepName` and `ContextKey` newtypes prevent typos at compile time
+- **Async First**: Built with `async-trait` for asynchronous workflows
+- **Retry Support**: Fixed delay and exponential backoff policies
+- **Configurable Timeouts**: Per-step timeout settings (default: 30s)
+- **Error Handling**: Structured errors with `thiserror`, lifecycle hooks
+- **Lightweight**: Minimal dependencies
 
-## Quick Start
-
-Add to your `Cargo.toml`:
+## Installation
 
 ```toml
 [dependencies]
 tsumugi = "0.1"
 async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
 ```
 
-Create a simple workflow:
+## Quick Start
 
 ```rust
 use tsumugi::prelude::*;
 use async_trait::async_trait;
 
-// Define your step
-define_step!(DataLoadStep);
+define_step!(HelloStep);
 
 #[async_trait]
-impl Step<String> for DataLoadStep {
-    async fn execute(&self, ctx: &mut Context<String>) -> Result<Option<String>, WorkflowError> {
-        println!("Loading data...");
-        ctx.insert("data", "Hello, World!".to_string());
+impl Step<String> for HelloStep {
+    async fn execute(&self, ctx: &mut Context<String>) -> Result<Option<StepName>, WorkflowError> {
+        ctx.insert("message", "Hello, World!".to_string());
         Ok(None)
     }
 }
 
-// Create and run workflow
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     let workflow = Workflow::builder()
-        .add::<DataLoadStep>()
-        .start_with_type::<DataLoadStep>()
-        .build()?;
+        .add::<HelloStep>()
+        .start_with_type::<HelloStep>()
+        .build()
+        .expect("valid workflow");
 
     let mut ctx = Context::new();
-    workflow.execute(&mut ctx).await?;
-    Ok(())
+    workflow.execute(&mut ctx).await.expect("workflow failed");
+
+    println!("{}", ctx.get("message").unwrap());
 }
 ```
 
-## Core Concepts
-
-### Steps
-
-Steps are the building blocks of workflows. Each step:
-- Implements the `Step` trait with generic type parameter
-- Can access and modify the workflow context
-- Can specify the next step to execute via return value
-- Has configurable timeout settings (default: 30s)
-- Supports `on_success` and `on_failure` hooks
-
-### Context
-
-The `Context` type provides:
-- Type-safe data storage with generic type parameter
-- Key-value based data sharing between steps
-- Basic execution tracking (elapsed time)
-- Metadata storage for additional information
-
-### Error Handling
-
-Built-in error handling with:
-- Step-specific errors (StepError, Timeout, StepNotFound, Configuration)
-- Basic timeout handling with configurable duration (default: 30s)
-- Error hooks with `on_success` and `on_failure` callbacks
-- Error propagation with detailed error types
-
 ## Examples
 
-Check out the [examples](examples/) directory for more complex use cases:
+See the [examples](examples/) directory:
 
-- [Simple Workflow](examples/simple_workflow.rs) - Basic workflow demonstration
-- [Order Processing](examples/order_workflow.rs) - Complex business workflow
-- [User Scoring](examples/user_scoring_workflow.rs) - Data processing pipeline
-# tsumugi
+- [simple_workflow.rs](examples/simple_workflow.rs) - Basic single-step workflow
+- [order_workflow.rs](examples/order_workflow.rs) - Multi-step workflow with branching
+- [user_scoring_workflow.rs](examples/user_scoring_workflow.rs) - Data processing pipeline
+
+## Documentation
+
+- [API Documentation](https://docs.rs/tsumugi) - Full API reference on docs.rs
+
+## Minimum Supported Rust Version
+
+Rust 1.75.0 or later.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
