@@ -28,16 +28,6 @@ tsumugi is different. It's a **library** you embed directly in your Rust applica
 - **Heterogeneous Context**: Store any type directly without wrapper enums
 - **Retry & Timeout**: Built-in exponential backoff and per-step timeouts
 
-## Architecture
-
-```
-tsumugi/
-├── tsumugi-core    # Core traits & types (no tokio dependency)
-└── tsumugi         # Workflow engine (tokio runtime)
-```
-
-This split allows library authors to implement `Step` without pulling in tokio.
-
 ## Installation
 
 ```toml
