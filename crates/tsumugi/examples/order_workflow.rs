@@ -39,8 +39,14 @@ struct Address {
 
 #[derive(Debug, Clone)]
 enum PaymentMethod {
-    CreditCard { card_number: String, expiry: String },
-    BankTransfer { account_number: String, bank_code: String },
+    CreditCard {
+        card_number: String,
+        expiry: String,
+    },
+    BankTransfer {
+        account_number: String,
+        bank_code: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -64,10 +70,12 @@ impl Step for OrderValidationStep {
     async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
         println!("Validating order...");
 
-        let order = ctx.get::<Order>("order").ok_or_else(|| WorkflowError::StepError {
-            step_name: self.name(),
-            details: "Order data not found".to_string(),
-        })?;
+        let order = ctx
+            .get::<Order>("order")
+            .ok_or_else(|| WorkflowError::StepError {
+                step_name: self.name(),
+                details: "Order data not found".to_string(),
+            })?;
 
         if order.items.is_empty() {
             return Err(WorkflowError::StepError {
@@ -100,10 +108,12 @@ impl Step for InventoryCheckStep {
     async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
         println!("Checking inventory...");
 
-        let order = ctx.get::<Order>("order").ok_or_else(|| WorkflowError::StepError {
-            step_name: self.name(),
-            details: "Order data not found".to_string(),
-        })?;
+        let order = ctx
+            .get::<Order>("order")
+            .ok_or_else(|| WorkflowError::StepError {
+                step_name: self.name(),
+                details: "Order data not found".to_string(),
+            })?;
 
         let inventory = ctx
             .get::<HashMap<String, u32>>("inventory")
@@ -113,12 +123,13 @@ impl Step for InventoryCheckStep {
             })?;
 
         for item in &order.items {
-            let available = inventory.get(&item.product_id).ok_or_else(|| {
-                WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: format!("Product not found: {}", item.product_id),
-                }
-            })?;
+            let available =
+                inventory
+                    .get(&item.product_id)
+                    .ok_or_else(|| WorkflowError::StepError {
+                        step_name: self.name(),
+                        details: format!("Product not found: {}", item.product_id),
+                    })?;
 
             if available < &item.quantity {
                 return Ok(StepOutput::next("pending_notification"));
@@ -142,10 +153,12 @@ impl Step for PaymentProcessingStep {
     async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
         println!("Processing payment...");
 
-        let order = ctx.get::<Order>("order").ok_or_else(|| WorkflowError::StepError {
-            step_name: self.name(),
-            details: "Order data not found".to_string(),
-        })?;
+        let order = ctx
+            .get::<Order>("order")
+            .ok_or_else(|| WorkflowError::StepError {
+                step_name: self.name(),
+                details: "Order data not found".to_string(),
+            })?;
 
         let (payment_status, next_step) = match &order.payment_method {
             PaymentMethod::CreditCard { .. } => (
@@ -182,10 +195,12 @@ impl Step for ShippingArrangementStep {
     async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
         println!("Arranging shipping...");
 
-        let order = ctx.get::<Order>("order").ok_or_else(|| WorkflowError::StepError {
-            step_name: self.name(),
-            details: "Order data not found".to_string(),
-        })?;
+        let order = ctx
+            .get::<Order>("order")
+            .ok_or_else(|| WorkflowError::StepError {
+                step_name: self.name(),
+                details: "Order data not found".to_string(),
+            })?;
 
         let shipping_info = ShippingInfo {
             tracking_number: format!("TRACK-{}", order.id),
@@ -210,10 +225,12 @@ impl Step for SuccessNotificationStep {
     async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
         println!("Sending success notification...");
 
-        let order = ctx.get::<Order>("order").ok_or_else(|| WorkflowError::StepError {
-            step_name: self.name(),
-            details: "Order data not found".to_string(),
-        })?;
+        let order = ctx
+            .get::<Order>("order")
+            .ok_or_else(|| WorkflowError::StepError {
+                step_name: self.name(),
+                details: "Order data not found".to_string(),
+            })?;
 
         let shipping_info =
             ctx.get::<ShippingInfo>("shipping_info")
@@ -244,10 +261,12 @@ impl Step for PendingNotificationStep {
     async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
         println!("Sending pending notification...");
 
-        let order = ctx.get::<Order>("order").ok_or_else(|| WorkflowError::StepError {
-            step_name: self.name(),
-            details: "Order data not found".to_string(),
-        })?;
+        let order = ctx
+            .get::<Order>("order")
+            .ok_or_else(|| WorkflowError::StepError {
+                step_name: self.name(),
+                details: "Order data not found".to_string(),
+            })?;
 
         println!(
             "Payment pending for Order ID: {}. Please complete the transfer.",

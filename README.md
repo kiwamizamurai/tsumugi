@@ -7,16 +7,26 @@
 
 A lightweight workflow engine for Rust. The name "Tsumugi" (紡) means "to spin" or "to weave" in Japanese.
 
+## Why tsumugi?
+
+Most workflow engines (Airflow, Prefect, Temporal) are **services** that require external databases, message queues, or server processes.
+
+tsumugi is different. It's a **library** you embed directly in your Rust application:
+
+| | tsumugi | Airflow | Prefect | Dagster | Temporal | Argo Workflows |
+|--|---------|---------|---------|---------|----------|----------------|
+| Type | Library | Platform | Framework | Platform | Platform | K8s CRD |
+| Language | Rust | Python | Python | Python | Go + SDKs | Go (YAML) |
+| DB required | No | Yes | No | No | Yes | No |
+| Server required | No | Yes | No | No | Yes | Yes (K8s) |
+| UI | No | Yes | Optional | Yes | Yes | Yes |
+
 ## Features
 
-- **Lightweight**: Minimal dependencies, fast compilation
+- **Lightweight**: Minimal dependencies, fast compilation, ~1MB binary
+- **Zero Infrastructure**: No database, no message queue, no server process
 - **Heterogeneous Context**: Store any type directly without wrapper enums
-- **Type-safe**: `StepName` and `ContextKey` newtypes prevent typos at compile time
-- **Async First**: Built with `async-trait` for asynchronous workflows
-- **Retry Support**: Fixed delay and exponential backoff policies
-- **Configurable Timeouts**: Per-step timeout settings
-- **Minimal Core**: `tsumugi-core` has zero runtime dependencies (no tokio)
-- **Error Handling**: Structured errors with `thiserror`, lifecycle hooks
+- **Retry & Timeout**: Built-in exponential backoff and per-step timeouts
 
 ## Architecture
 
@@ -113,7 +123,12 @@ Extend step behavior with optional traits:
 // Retry support
 impl Retryable for MyStep {
     fn retry_policy(&self) -> RetryPolicy {
-        RetryPolicy::exponential_backoff(3, Duration::from_millis(100), 2.0)
+        RetryPolicy::exponential_backoff(
+            3,                              // max retries
+            Duration::from_millis(100),     // initial delay
+            Duration::from_secs(5),         // max delay
+            2,                              // multiplier
+        ).unwrap_or(RetryPolicy::None)
     }
 }
 
@@ -139,20 +154,45 @@ impl WithTimeout for MyStep {
 }
 ```
 
+## Use Cases
+
+Tsumugi is ideal for lightweight, embeddable workflow automation:
+
+| Use Case | Example |
+|----------|---------|
+| **ETL Pipelines** | Fetch REST API data, transform, export to CSV |
+| **Health Monitoring** | Check multiple endpoints, aggregate status, alert |
+| **File Processing** | Batch transform logs, convert formats |
+| **Data Validation** | Multi-stage validation for CI/CD gates |
+| **Notifications** | Multi-channel dispatch (Email, Slack, Webhook) |
+| **GitHub Actions** | Scheduled data jobs, report generation |
+
 ## Examples
 
 See the [examples](crates/tsumugi/examples/) directory:
 
-- [simple_workflow.rs](crates/tsumugi/examples/simple_workflow.rs) - Basic single-step workflow
-- [order_workflow.rs](crates/tsumugi/examples/order_workflow.rs) - Multi-step workflow with branching
-- [user_scoring_workflow.rs](crates/tsumugi/examples/user_scoring_workflow.rs) - Data processing pipeline
+### Basic
+- [simple_workflow.rs](crates/tsumugi/examples/simple_workflow.rs) - Single-step workflow
+- [order_workflow.rs](crates/tsumugi/examples/order_workflow.rs) - Multi-step with branching
+- [user_scoring_workflow.rs](crates/tsumugi/examples/user_scoring_workflow.rs) - Data processing
+
+### Real-World Patterns
+- [etl_api_to_csv.rs](crates/tsumugi/examples/etl_api_to_csv.rs) - REST API to CSV (GitHub Actions friendly)
+- [health_check_monitor.rs](crates/tsumugi/examples/health_check_monitor.rs) - Service health monitoring with retries
+- [file_processing_pipeline.rs](crates/tsumugi/examples/file_processing_pipeline.rs) - Batch log file aggregation
+- [data_validation_pipeline.rs](crates/tsumugi/examples/data_validation_pipeline.rs) - Multi-stage data validation
+- [notification_dispatch.rs](crates/tsumugi/examples/notification_dispatch.rs) - Multi-channel notifications
 
 Run examples:
 
 ```bash
+# Basic
 cargo run -p tsumugi --example simple_workflow
-cargo run -p tsumugi --example order_workflow
-cargo run -p tsumugi --example user_scoring_workflow
+
+# Real-world patterns
+cargo run -p tsumugi --example etl_api_to_csv
+cargo run -p tsumugi --example health_check_monitor
+cargo run -p tsumugi --example data_validation_pipeline
 ```
 
 ## Documentation

@@ -91,12 +91,12 @@ impl Step for DataValidationStep {
             });
         }
 
-        let scores = ctx
-            .get::<HashMap<u64, f64>>("scores")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Scores not found".to_string(),
-            })?;
+        let scores =
+            ctx.get::<HashMap<u64, f64>>("scores")
+                .ok_or_else(|| WorkflowError::StepError {
+                    step_name: self.name(),
+                    details: "Scores not found".to_string(),
+                })?;
 
         if !scores.contains_key(&user.id) {
             return Err(WorkflowError::StepError {
@@ -130,12 +130,12 @@ impl Step for DataProcessingStep {
             })?
             .clone();
 
-        let scores = ctx
-            .get::<HashMap<u64, f64>>("scores")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Scores not found".to_string(),
-            })?;
+        let scores =
+            ctx.get::<HashMap<u64, f64>>("scores")
+                .ok_or_else(|| WorkflowError::StepError {
+                    step_name: self.name(),
+                    details: "Scores not found".to_string(),
+                })?;
 
         let score = scores
             .get(&user.id)
