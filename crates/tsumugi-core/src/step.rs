@@ -113,8 +113,14 @@ pub trait Step: Send + Sync + Debug {
     /// - `Err(error)` - Step failed
     async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError>;
 
-    /// Returns the step name.
-    fn name(&self) -> StepName;
+    /// Returns a descriptive name for this step implementation.
+    ///
+    /// Workflows identify steps by the name they are registered under, which
+    /// is what appears in logs, errors and execution reports. This name is only
+    /// a label for the implementation itself and defaults to its type name.
+    fn name(&self) -> StepName {
+        StepName::new(std::any::type_name::<Self>())
+    }
 }
 
 /// Retry policy for step execution.

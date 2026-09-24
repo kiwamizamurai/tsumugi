@@ -19,14 +19,17 @@ tsumugi is different. It's a **library** you embed directly in your Rust applica
 | Language | Rust | Python | Python | Python | Go + SDKs | Go (YAML) |
 | DB required | No | Yes | No | No | Yes | No |
 | Server required | No | Yes | No | No | Yes | Yes (K8s) |
-| UI | No | Yes | Optional | Yes | Yes | Yes |
+| UI | Mermaid export | Yes | Optional | Yes | Yes | Yes |
 
 ## Features
 
 - **Lightweight**: Minimal dependencies, fast compilation, ~1MB binary
 - **Zero Infrastructure**: No database, no message queue, no server process
-- **Heterogeneous Context**: Store any type directly without wrapper enums
+- **Heterogeneous Context**: Store any type directly without wrapper enums, with optional typed keys
 - **Retry & Timeout**: Built-in exponential backoff and per-step timeouts
+- **Validated Transitions**: Declare step transitions and catch typos and unreachable steps at build time
+- **Mermaid Diagrams**: Render any workflow as a flowchart, no UI server required
+- **Execution Reports**: See which steps ran, how long they took and how often they retried
 
 ## Installation
 
@@ -53,25 +56,24 @@ impl Step for HelloStep {
         Ok(StepOutput::done())
     }
 
-    fn name(&self) -> StepName {
-        StepName::new("HelloStep")
-    }
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow = Workflow::builder()
         .add_step("hello", HelloStep)
         .start_with("hello")
-        .build()
-        .expect("valid workflow");
+        .build()?;
 
     let mut ctx = Context::new();
-    workflow.execute(&mut ctx).await.expect("workflow failed");
+    let report = workflow.execute(&mut ctx).await?;
 
     // Retrieve typed data from context
-    let message: &String = ctx.get("message").unwrap();
-    println!("{}", message);
+    if let Some(message) = ctx.get::<String>("message") {
+        println!("{}", message);
+    }
+    println!("{}", report);
+    Ok(())
 }
 ```
 
@@ -141,6 +143,19 @@ let id: &u64 = ctx.get("user_id").unwrap();
 let name: &String = ctx.get("name").unwrap();
 ```
 
+### Typed Keys
+
+Declare keys as constants to have the compiler check value types and drop the annotations:
+
+```rust
+const USER_ID: Key<u64> = Key::new("user_id");
+
+ctx.insert(USER_ID, 123);           // ctx.insert(USER_ID, "123") does not compile
+let id = ctx.get(USER_ID);          // Option<&u64>, no annotation needed
+```
+
+Typed keys and string keys share the same namespace, so you can adopt them gradually.
+
 ## Step Output
 
 Steps return `StepOutput` to control workflow flow:
@@ -154,6 +169,84 @@ async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> 
     Ok(StepOutput::done())
 }
 ```
+
+## Declared Transitions
+
+Optionally declare where each step may go with `then`, and mark end steps with `terminal`:
+
+```rust
+let workflow = Workflow::builder()
+    .add_step("validate", ValidateStep)
+    .then(["charge", "reject"])
+    .add_step("charge", ChargeStep)
+    .then(["ship"])
+    .add_step("ship", ShipStep)
+    .terminal()
+    .add_step("reject", RejectStep)
+    .terminal()
+    .start_with("validate")
+    .build()?;
+```
+
+Declared transitions are checked:
+
+- **At build time**: a transition to a step that doesn't exist (e.g. a typo) fails with
+  `UnknownTransitionTarget`, and a step that can never be reached fails with `UnreachableStep`.
+  Duplicate step names fail with `DuplicateStep`.
+- **At runtime**: a step returning a next step it didn't declare fails with `UndeclaredTransition`.
+
+Declarations are opt-in per step. Undeclared steps may continue anywhere, and unreachable-step
+detection is skipped when a reachable step is undeclared. Loops are allowed.
+
+## Visualizing Workflows
+
+`to_mermaid()` renders a workflow as a [Mermaid](https://mermaid.js.org) flowchart that GitHub,
+GitLab and many other tools display natively:
+
+```rust
+println!("{}", workflow.to_mermaid());
+```
+
+```mermaid
+flowchart TD
+    __start((start))
+    __end((end))
+    s0["validate"]
+    s1["charge"]
+    s2["ship"]
+    s3["reject"]
+    __start --> s0
+    s0 --> s1
+    s0 --> s3
+    s1 --> s2
+    s2 --> __end
+    s3 --> __end
+```
+
+Steps without declared transitions are drawn with a dashed border.
+
+## Execution Reports
+
+`execute` returns an `ExecutionReport` describing the run. On failure, the `ExecutionError`
+carries the report up to the failing step:
+
+```rust
+match workflow.execute(&mut ctx).await {
+    Ok(report) => println!("{}", report),
+    Err(err) => eprintln!("failed: {}\n{}", err, err.report()),
+}
+```
+
+```text
+validate  1 attempt       0.1ms  -> charge
+charge    2 attempts     94.1ms  -> ship
+ship      1 attempt       0.1ms  done
+total: 94.3ms, 1 retry
+```
+
+The report is also available programmatically via `steps()`, `path()`, `total_retries()` and
+`duration()`, e.g. to export metrics. `ExecutionError` converts into `WorkflowError` and
+`Box<dyn Error>`, so `?` works as usual.
 
 ## Optional Traits
 
@@ -214,6 +307,7 @@ See the [examples](crates/tsumugi/examples/) directory:
 ### Basic
 - [simple_workflow.rs](crates/tsumugi/examples/simple_workflow.rs) - Single-step workflow
 - [closure_workflow.rs](crates/tsumugi/examples/closure_workflow.rs) - Steps defined with closures
+- [workflow_graph.rs](crates/tsumugi/examples/workflow_graph.rs) - Typed keys, declared transitions, Mermaid and reports
 - [order_workflow.rs](crates/tsumugi/examples/order_workflow.rs) - Multi-step with branching
 - [user_scoring_workflow.rs](crates/tsumugi/examples/user_scoring_workflow.rs) - Data processing
 
@@ -230,6 +324,8 @@ Run examples:
 # Basic
 cargo run -p tsumugi --example simple_workflow
 cargo run -p tsumugi --example closure_workflow
+cargo run -p tsumugi --example workflow_graph
+cargo run -p tsumugi --example workflow_graph -- --mermaid
 
 # Real-world patterns
 cargo run -p tsumugi --example etl_api_to_csv

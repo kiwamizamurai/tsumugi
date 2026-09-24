@@ -3,9 +3,13 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
+use std::marker::PhantomData;
 use std::time::Instant;
 
-/// Type-safe context key wrapper.
+/// String key under which a value is stored in a [`Context`].
+///
+/// A `ContextKey` does not constrain the value type. Use [`Key`] for keys
+/// that are checked against the value type at compile time.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContextKey(String);
 
@@ -47,6 +51,134 @@ impl AsRef<str> for ContextKey {
 
 impl std::borrow::Borrow<str> for ContextKey {
     fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A context key bound to the type of the value it stores.
+///
+/// Declaring keys as constants lets the compiler check that a key is always
+/// used with the same value type, and removes the need for type annotations
+/// when reading values back.
+///
+/// Typed keys share the namespace of plain string keys: `Key::<u64>::new("id")`
+/// and `"id"` address the same entry.
+///
+/// # Examples
+///
+/// ```
+/// use tsumugi_core::{Context, Key};
+///
+/// const USER_ID: Key<u64> = Key::new("user_id");
+///
+/// let mut ctx = Context::new();
+/// ctx.insert(USER_ID, 42);
+///
+/// let id: Option<&u64> = ctx.get(USER_ID); // type inferred from the key
+/// assert_eq!(id, Some(&42));
+/// ```
+///
+/// Using a key with the wrong value type fails to compile:
+///
+/// ```compile_fail
+/// use tsumugi_core::{Context, Key};
+///
+/// const USER_ID: Key<u64> = Key::new("user_id");
+///
+/// let mut ctx = Context::new();
+/// ctx.insert(USER_ID, "not a number");
+/// ```
+pub struct Key<T> {
+    name: &'static str,
+    // `fn() -> T` keeps `Key<T>` `Send + Sync + Copy` regardless of `T`.
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Key<T> {
+    /// Creates a new typed key.
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns the key name.
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+impl<T> Clone for Key<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Key<T> {}
+
+impl<T> fmt::Debug for Key<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Key")
+            .field(&self.name)
+            .field(&std::any::type_name::<T>())
+            .finish()
+    }
+}
+
+impl<T> AsRef<str> for Key<T> {
+    fn as_ref(&self) -> &str {
+        self.name
+    }
+}
+
+impl<T> From<Key<T>> for ContextKey {
+    fn from(key: Key<T>) -> Self {
+        Self::new(key.name)
+    }
+}
+
+/// Types that can address a value of type `T` in a [`Context`].
+///
+/// Plain string keys (`&str`, `String`, [`ContextKey`]) work with any value
+/// type, while a typed [`Key<T>`] only works with `T`.
+pub trait KeyFor<T> {
+    /// Returns the key name.
+    fn key_name(&self) -> &str;
+}
+
+impl<T> KeyFor<T> for Key<T> {
+    fn key_name(&self) -> &str {
+        self.name
+    }
+}
+
+impl<T> KeyFor<T> for &str {
+    fn key_name(&self) -> &str {
+        self
+    }
+}
+
+impl<T> KeyFor<T> for String {
+    fn key_name(&self) -> &str {
+        self
+    }
+}
+
+impl<T> KeyFor<T> for &String {
+    fn key_name(&self) -> &str {
+        self
+    }
+}
+
+impl<T> KeyFor<T> for ContextKey {
+    fn key_name(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<T> KeyFor<T> for &ContextKey {
+    fn key_name(&self) -> &str {
         &self.0
     }
 }
@@ -107,37 +239,47 @@ impl Context {
     /// Inserts a value with the given key.
     ///
     /// If the key already exists, the previous value is replaced.
-    pub fn insert<T: Any + Send + Sync>(&mut self, key: impl Into<ContextKey>, value: T) {
-        self.data.insert(key.into(), Box::new(value));
+    pub fn insert<T: Any + Send + Sync>(&mut self, key: impl KeyFor<T>, value: T) {
+        self.data
+            .insert(ContextKey::new(key.key_name()), Box::new(value));
     }
 
     /// Returns a reference to the value for the given key.
     ///
     /// Returns `None` if the key doesn't exist or the type doesn't match.
-    pub fn get<T: Any>(&self, key: &str) -> Option<&T> {
-        self.data.get(key).and_then(|v| v.downcast_ref::<T>())
+    pub fn get<T: Any>(&self, key: impl KeyFor<T>) -> Option<&T> {
+        self.data
+            .get(key.key_name())
+            .and_then(|v| v.downcast_ref::<T>())
     }
 
     /// Returns a mutable reference to the value for the given key.
     ///
     /// Returns `None` if the key doesn't exist or the type doesn't match.
-    pub fn get_mut<T: Any>(&mut self, key: &str) -> Option<&mut T> {
-        self.data.get_mut(key).and_then(|v| v.downcast_mut::<T>())
+    pub fn get_mut<T: Any>(&mut self, key: impl KeyFor<T>) -> Option<&mut T> {
+        self.data
+            .get_mut(key.key_name())
+            .and_then(|v| v.downcast_mut::<T>())
     }
 
     /// Removes a value by key and returns it.
     ///
     /// Returns `None` if the key doesn't exist or the type doesn't match.
-    pub fn remove<T: Any>(&mut self, key: &str) -> Option<T> {
+    /// On a type mismatch the entry is left in place.
+    pub fn remove<T: Any>(&mut self, key: impl KeyFor<T>) -> Option<T> {
+        let name = key.key_name();
+        if !self.data.get(name)?.is::<T>() {
+            return None;
+        }
         self.data
-            .remove(key)
+            .remove(name)
             .and_then(|v| v.downcast::<T>().ok())
             .map(|b| *b)
     }
 
     /// Returns `true` if the context contains a value for the given key.
-    pub fn contains_key(&self, key: &str) -> bool {
-        self.data.contains_key(key)
+    pub fn contains_key(&self, key: impl AsRef<str>) -> bool {
+        self.data.contains_key(key.as_ref())
     }
 
     /// Returns an iterator over all keys in the context.
@@ -206,6 +348,33 @@ mod tests {
         let removed = ctx.remove::<String>("key");
         assert_eq!(removed, Some("value".to_string()));
         assert!(!ctx.contains_key("key"));
+    }
+
+    #[test]
+    fn test_remove_wrong_type_keeps_entry() {
+        let mut ctx = Context::new();
+        ctx.insert("key", 1i32);
+
+        assert_eq!(ctx.remove::<String>("key"), None);
+        assert_eq!(ctx.get::<i32>("key"), Some(&1));
+    }
+
+    #[test]
+    fn test_typed_key() {
+        const COUNT: Key<u32> = Key::new("count");
+        let mut ctx = Context::new();
+
+        ctx.insert(COUNT, 1);
+        if let Some(count) = ctx.get_mut(COUNT) {
+            *count += 1;
+        }
+
+        assert_eq!(ctx.get(COUNT), Some(&2));
+        assert!(ctx.contains_key(COUNT));
+        // Typed and string keys share the same namespace.
+        assert_eq!(ctx.get::<u32>("count"), Some(&2));
+        assert_eq!(ctx.remove(COUNT), Some(2));
+        assert!(ctx.is_empty());
     }
 
     #[test]

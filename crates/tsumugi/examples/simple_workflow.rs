@@ -31,16 +31,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx = Context::new();
 
     match workflow.execute(&mut ctx).await {
-        Ok(()) => {
+        Ok(_) => {
             println!("Workflow completed successfully");
             if let Some(data) = ctx.get::<String>("data") {
                 println!("Data: {}", data);
             }
         }
-        Err(errors) => {
-            for error in errors {
-                eprintln!("Workflow failed: {:?}", error);
-            }
+        Err(err) => {
+            eprintln!("Workflow failed: {}", err);
+            eprintln!("{}", err.report());
         }
     }
 

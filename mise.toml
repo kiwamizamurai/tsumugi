@@ -9,7 +9,7 @@ run = ["cargo fmt --all"]
 
 [tasks.lint]
 run = [
-    "cargo clippy -- -D warnings",
+    "cargo clippy --workspace --all-targets -- -D warnings",
     "cargo fmt --all -- --check"
 ]
 

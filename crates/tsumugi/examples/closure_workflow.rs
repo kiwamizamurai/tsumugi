@@ -83,15 +83,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx = Context::new();
 
     match workflow.execute(&mut ctx).await {
-        Ok(()) => {
+        Ok(_) => {
             let average = ctx.get::<f64>("average").copied().unwrap_or_default();
             let result = ctx.get::<String>("result").cloned().unwrap_or_default();
             println!("Average score: {:.1} ({})", average, result);
         }
-        Err(errors) => {
-            for error in errors {
-                eprintln!("Workflow failed: {:?}", error);
-            }
+        Err(err) => {
+            eprintln!("Workflow failed: {}", err);
+            eprintln!("{}", err.report());
         }
     }
 

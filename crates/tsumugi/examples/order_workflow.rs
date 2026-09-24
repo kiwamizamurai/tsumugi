@@ -337,11 +337,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.insert("inventory", inventory);
 
     match workflow.execute(&mut ctx).await {
-        Ok(()) => println!("\nWorkflow completed successfully"),
-        Err(errors) => {
-            for error in errors {
-                eprintln!("Workflow failed: {:?}", error);
-            }
+        Ok(_) => println!("\nWorkflow completed successfully"),
+        Err(err) => {
+            eprintln!("Workflow failed: {}", err);
+            eprintln!("{}", err.report());
         }
     }
 

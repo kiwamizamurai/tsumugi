@@ -204,9 +204,9 @@ impl Step for DispatchStep {
         for channel in &request.channels {
             let result = dispatch_to_channel(channel, &request.recipient, &rendered);
             println!(
-                "  {} {} -> {}",
+                "  {} {:?} -> {}",
                 if result.success { "[OK]" } else { "[FAIL]" },
-                format!("{:?}", channel),
+                channel,
                 result.message_id.as_deref().unwrap_or("N/A")
             );
             results.push(result);
@@ -395,7 +395,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Notification Dispatch Workflow ===\n");
 
     match workflow.execute(&mut ctx).await {
-        Ok(()) => {
+        Ok(_) => {
             let report = ctx.get::<DeliveryReport>("delivery_report");
             if let Some(r) = report {
                 if r.all_succeeded {
@@ -406,10 +406,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Err(errors) => {
-            for error in errors {
-                eprintln!("Notification workflow failed: {:?}", error);
-            }
+        Err(err) => {
+            eprintln!("Notification workflow failed: {}", err);
+            eprintln!("{}", err.report());
             std::process::exit(1);
         }
     }
