@@ -12,7 +12,6 @@
 
 #![allow(dead_code)]
 
-use async_trait::async_trait;
 use std::time::Duration;
 use tsumugi::prelude::*;
 
@@ -145,6 +144,16 @@ impl Step for CheckServicesStep {
 
     fn name(&self) -> StepName {
         StepName::new("CheckServices")
+    }
+
+    fn retry_policy(&self) -> RetryPolicy {
+        // 3 retries, starting at 500ms, max 5s, multiplier 2
+        RetryPolicy::exponential_backoff(3, Duration::from_millis(500), Duration::from_secs(5), 2)
+            .unwrap_or(RetryPolicy::None)
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(30))
     }
 }
 
@@ -294,29 +303,13 @@ impl Step for ReportStep {
     }
 }
 
-// Implement retry for CheckServicesStep
-impl Retryable for CheckServicesStep {
-    fn retry_policy(&self) -> RetryPolicy {
-        // 3 retries, starting at 500ms, max 5s, multiplier 2
-        RetryPolicy::exponential_backoff(3, Duration::from_millis(500), Duration::from_secs(5), 2)
-            .unwrap_or(RetryPolicy::None)
-    }
-}
-
-// Implement timeout for CheckServicesStep
-impl WithTimeout for CheckServicesStep {
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(30)
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let workflow = Workflow::builder()
         .add_step("load_config", LoadConfigStep)
-        .add_retryable("check_services", CheckServicesStep)
+        .add_step("check_services", CheckServicesStep)
         .add_step("aggregate", AggregateResultsStep)
         .add_step("alert", AlertStep)
         .add_step("report", ReportStep)

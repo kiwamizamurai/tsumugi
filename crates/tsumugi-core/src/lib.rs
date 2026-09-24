@@ -16,20 +16,20 @@
 //! - [`FnStep`] - A step backed by a synchronous closure
 //! - [`AsyncFnStep`] - A step backed by an asynchronous closure
 //!
-//! # Optional Traits
+//! # Step Configuration
 //!
-//! - [`WithHooks`] - Add lifecycle callbacks (on_success, on_failure)
-//! - [`Retryable`] - Configure retry policy
-//! - [`WithTimeout`] - Configure custom timeout
+//! Retry policy, timeout and lifecycle hooks are optional methods on [`Step`]
+//! with sensible defaults. See the [`Step`] documentation for details.
 
 mod context;
 mod error;
 mod fn_step;
 mod step;
-mod traits;
 
 pub use context::{Context, ContextKey, Key, KeyFor};
 pub use error::{HookType, WorkflowError};
 pub use fn_step::{AsyncFnStep, BoxFuture, FnStep};
-pub use step::{RetryPolicy, RetryPolicyError, Step, StepConfig, StepName, StepOutput};
-pub use traits::{Retryable, WithHooks, WithTimeout};
+pub use step::{RetryPolicy, RetryPolicyError, Step, StepName, StepOutput, DEFAULT_TIMEOUT};
+
+/// Re-export of [`async_trait`](https://docs.rs/async-trait), used to implement [`Step`].
+pub use async_trait::async_trait;

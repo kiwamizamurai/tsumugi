@@ -1,6 +1,5 @@
 //! Simple single-step workflow example.
 
-use async_trait::async_trait;
 use tsumugi::prelude::*;
 
 #[derive(Debug)]

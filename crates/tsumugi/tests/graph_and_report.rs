@@ -85,14 +85,9 @@ async fn test_report_records_retries() {
     });
 
     let workflow = Workflow::builder()
-        .add_configured(
-            "flaky",
-            flaky,
-            StepConfig {
-                timeout: Some(Duration::from_secs(1)),
-                retry_policy: RetryPolicy::fixed(5, Duration::from_millis(1)),
-            },
-        )
+        .add_step("flaky", flaky)
+        .retry(RetryPolicy::fixed(5, Duration::from_millis(1)))
+        .timeout(Duration::from_secs(1))
         .start_with("flaky")
         .build()
         .expect("valid workflow");

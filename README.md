@@ -23,10 +23,10 @@ tsumugi is different. It's a **library** you embed directly in your Rust applica
 
 ## Features
 
-- **Lightweight**: Minimal dependencies, fast compilation, ~1MB binary
+- **Lightweight**: Three dependencies (`tokio` with only the `time` feature, `tracing`, `async-trait`)
 - **Zero Infrastructure**: No database, no message queue, no server process
 - **Heterogeneous Context**: Store any type directly without wrapper enums, with optional typed keys
-- **Retry & Timeout**: Built-in exponential backoff and per-step timeouts
+- **Retry, Timeout & Hooks**: Exponential backoff, per-step timeouts and success/failure hooks
 - **Validated Transitions**: Declare step transitions and catch typos and unreachable steps at build time
 - **Mermaid Diagrams**: Render any workflow as a flowchart, no UI server required
 - **Execution Reports**: See which steps ran, how long they took and how often they retried
@@ -36,15 +36,13 @@ tsumugi is different. It's a **library** you embed directly in your Rust applica
 ```toml
 [dependencies]
 tsumugi = "0.1"
-async-trait = "0.1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 ## Quick Start
 
 ```rust
-use tsumugi::prelude::*;
-use async_trait::async_trait;
+use tsumugi::prelude::*; // includes the `async_trait` attribute
 
 #[derive(Debug)]
 struct HelloStep;
@@ -55,7 +53,6 @@ impl Step for HelloStep {
         ctx.insert("message", "Hello, World!".to_string());
         Ok(StepOutput::done())
     }
-
 }
 
 #[tokio::main]
@@ -98,30 +95,27 @@ let workflow = Workflow::builder()
     .build()?;
 ```
 
-`FnStep` and `AsyncFnStep` implement `Step`, so closures work with every builder method,
-including timeouts and retries, and can be mixed freely with struct-based steps:
+Closure steps can be configured with retries and timeouts like any other step, and mixed
+freely with struct-based steps:
 
 ```rust
 let client = Arc::new(ApiClient::new());
 
-let fetch = AsyncFnStep::new("fetch", move |ctx| {
-    // The closure runs once per attempt, so clone captured handles first
-    let client = Arc::clone(&client);
-    Box::pin(async move {
-        let data = client.fetch().await.map_err(|e| WorkflowError::StepError {
-            step_name: StepName::new("fetch"),
-            details: e.to_string(),
-        })?;
-        ctx.insert("data", data);
-        Ok(StepOutput::next("save"))
-    })
-});
-
 let workflow = Workflow::builder()
-    .add_configured("fetch", fetch, StepConfig {
-        timeout: Some(Duration::from_secs(5)),
-        retry_policy: RetryPolicy::fixed(3, Duration::from_millis(100)),
+    .add_async_fn("fetch", move |ctx| {
+        // The closure runs once per attempt, so clone captured handles first
+        let client = Arc::clone(&client);
+        Box::pin(async move {
+            let data = client.fetch().await.map_err(|e| WorkflowError::StepError {
+                step_name: StepName::new("fetch"),
+                details: e.to_string(),
+            })?;
+            ctx.insert("data", data);
+            Ok(StepOutput::next("save"))
+        })
     })
+    .retry(RetryPolicy::fixed(3, Duration::from_millis(100)))
+    .timeout(Duration::from_secs(5))
     .add_step("save", SaveStep)
     .start_with("fetch")
     .build()?;
@@ -248,44 +242,52 @@ The report is also available programmatically via `steps()`, `path()`, `total_re
 `duration()`, e.g. to export metrics. `ExecutionError` converts into `WorkflowError` and
 `Box<dyn Error>`, so `?` works as usual.
 
-## Optional Traits
+## Retries, Timeouts and Hooks
 
-Extend step behavior with optional traits:
+Only `execute` is required to implement `Step`. Override the other methods to configure
+the step itself:
 
 ```rust
-// Retry support
-impl Retryable for MyStep {
-    fn retry_policy(&self) -> RetryPolicy {
-        RetryPolicy::exponential_backoff(
-            3,                              // max retries
-            Duration::from_millis(100),     // initial delay
-            Duration::from_secs(5),         // max delay
-            2,                              // multiplier
-        ).unwrap_or(RetryPolicy::None)
-    }
-}
-
-// Lifecycle hooks
 #[async_trait]
-impl WithHooks for MyStep {
+impl Step for FetchStep {
+    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+        // ...
+    }
+
+    // Default: RetryPolicy::None
+    fn retry_policy(&self) -> RetryPolicy {
+        RetryPolicy::exponential(3, Duration::from_millis(100)) // 100ms, 200ms, 400ms
+    }
+
+    // Default: Some(30s). Return None to disable.
+    fn timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(60))
+    }
+
+    // Called once after the step succeeds. An error fails the workflow.
     async fn on_success(&self, ctx: &mut Context) -> Result<(), WorkflowError> {
-        println!("Step completed!");
         Ok(())
     }
 
+    // Called once after all retries are exhausted, e.g. for cleanup or compensation.
+    // The workflow still fails with the original error.
     async fn on_failure(&self, ctx: &mut Context, error: &WorkflowError) -> Result<(), WorkflowError> {
-        eprintln!("Step failed: {:?}", error);
         Ok(())
-    }
-}
-
-// Custom timeout
-impl WithTimeout for MyStep {
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(60)
     }
 }
 ```
+
+Or configure a step where it is registered, which takes precedence:
+
+```rust
+Workflow::builder()
+    .add_step("fetch", FetchStep)
+    .retry(RetryPolicy::fixed(5, Duration::from_secs(1)))
+    .timeout(Duration::from_secs(10))   // or .no_timeout()
+    .then(["save"])
+```
+
+`retry`, `timeout`, `no_timeout`, `then` and `terminal` all apply to the most recently added step.
 
 ## Use Cases
 

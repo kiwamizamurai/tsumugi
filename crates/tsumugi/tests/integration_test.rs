@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -107,7 +106,8 @@ impl Step for SlowStep {
 #[tokio::test]
 async fn test_timeout_error() {
     let workflow = Workflow::builder()
-        .add_with_timeout("slow", SlowStep, Duration::from_millis(50))
+        .add_step("slow", SlowStep)
+        .timeout(Duration::from_millis(50))
         .start_with("slow")
         .build()
         .expect("valid workflow");
@@ -151,9 +151,7 @@ impl Step for RetryableStep {
     fn name(&self) -> StepName {
         StepName::new("RetryableStep")
     }
-}
 
-impl Retryable for RetryableStep {
     fn retry_policy(&self) -> RetryPolicy {
         RetryPolicy::fixed(3, Duration::from_millis(10))
     }
@@ -168,7 +166,7 @@ async fn test_retry_eventual_success() {
     };
 
     let workflow = Workflow::builder()
-        .add_retryable("retry", step)
+        .add_step("retry", step)
         .start_with("retry")
         .build()
         .expect("valid workflow");
@@ -190,7 +188,7 @@ async fn test_retry_exhausted() {
     };
 
     let workflow = Workflow::builder()
-        .add_retryable("retry", step)
+        .add_step("retry", step)
         .start_with("retry")
         .build()
         .expect("valid workflow");

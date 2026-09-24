@@ -79,6 +79,10 @@ pub enum WorkflowError {
     },
 
     /// A lifecycle hook failed.
+    ///
+    /// Returned when [`Step::on_success`](crate::Step::on_success) fails.
+    /// Errors from [`Step::on_failure`](crate::Step::on_failure) are logged
+    /// instead, so that the original step error is preserved.
     #[error("Hook '{hook_type}' failed in step '{step_name}': {details}")]
     HookError {
         /// The name of the step whose hook failed.

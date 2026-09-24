@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -126,14 +125,9 @@ async fn test_async_closure_with_captured_state_and_retry() {
     });
 
     let workflow = Workflow::builder()
-        .add_configured(
-            "flaky",
-            step,
-            StepConfig {
-                timeout: Some(Duration::from_secs(1)),
-                retry_policy: RetryPolicy::fixed(3, Duration::from_millis(1)),
-            },
-        )
+        .add_step("flaky", step)
+        .retry(RetryPolicy::fixed(3, Duration::from_millis(1)))
+        .timeout(Duration::from_secs(1))
         .start_with("flaky")
         .build()
         .expect("valid workflow");
@@ -156,7 +150,8 @@ async fn test_async_closure_timeout() {
     });
 
     let workflow = Workflow::builder()
-        .add_with_timeout("slow", step, Duration::from_millis(20))
+        .add_step("slow", step)
+        .timeout(Duration::from_millis(20))
         .start_with("slow")
         .build()
         .expect("valid workflow");

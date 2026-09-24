@@ -14,7 +14,6 @@
 
 #![allow(dead_code)]
 
-use async_trait::async_trait;
 use tsumugi::prelude::*;
 
 // Input data to validate

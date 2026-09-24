@@ -14,7 +14,6 @@
 
 #![allow(dead_code)]
 
-use async_trait::async_trait;
 use std::time::Duration;
 use tsumugi::prelude::*;
 
@@ -220,6 +219,16 @@ impl Step for DispatchStep {
     fn name(&self) -> StepName {
         StepName::new("Dispatch")
     }
+
+    fn retry_policy(&self) -> RetryPolicy {
+        // 3 retries, starting at 1s, max 10s, multiplier 2
+        RetryPolicy::exponential_backoff(3, Duration::from_secs(1), Duration::from_secs(10), 2)
+            .unwrap_or(RetryPolicy::None)
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(30))
+    }
 }
 
 // Simulate channel dispatch
@@ -362,22 +371,6 @@ impl Step for ReportStep {
     }
 }
 
-// Implement retry for dispatch step
-impl Retryable for DispatchStep {
-    fn retry_policy(&self) -> RetryPolicy {
-        // 3 retries, starting at 1s, max 10s, multiplier 2
-        RetryPolicy::exponential_backoff(3, Duration::from_secs(1), Duration::from_secs(10), 2)
-            .unwrap_or(RetryPolicy::None)
-    }
-}
-
-// Implement timeout for dispatch step
-impl WithTimeout for DispatchStep {
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(30)
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
@@ -385,7 +378,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow = Workflow::builder()
         .add_step("load", LoadRequestStep)
         .add_step("render", RenderTemplateStep)
-        .add_retryable("dispatch", DispatchStep)
+        .add_step("dispatch", DispatchStep)
         .add_step("report", ReportStep)
         .start_with("load")
         .build()?;
