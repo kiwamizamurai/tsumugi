@@ -10,6 +10,11 @@
 //! - [`Context`] - Heterogeneous type storage for sharing data between steps
 //! - [`WorkflowError`] - Error types for workflow execution
 //!
+//! # Closure Steps
+//!
+//! - [`FnStep`] - A step backed by a synchronous closure
+//! - [`AsyncFnStep`] - A step backed by an asynchronous closure
+//!
 //! # Optional Traits
 //!
 //! - [`WithHooks`] - Add lifecycle callbacks (on_success, on_failure)
@@ -18,10 +23,12 @@
 
 mod context;
 mod error;
+mod fn_step;
 mod step;
 mod traits;
 
 pub use context::{Context, ContextKey};
 pub use error::{HookType, WorkflowError};
+pub use fn_step::{AsyncFnStep, BoxFuture, FnStep};
 pub use step::{RetryPolicy, RetryPolicyError, Step, StepConfig, StepName, StepOutput};
 pub use traits::{Retryable, WithHooks, WithTimeout};

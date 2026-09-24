@@ -45,7 +45,8 @@ pub use workflow::{Workflow, WorkflowBuilder};
 /// Prelude for convenient imports.
 pub mod prelude {
     pub use crate::{
-        Context, ContextKey, HookType, RetryPolicy, Retryable, Step, StepConfig, StepName,
-        StepOutput, WithHooks, WithTimeout, Workflow, WorkflowBuilder, WorkflowError,
+        AsyncFnStep, BoxFuture, Context, ContextKey, FnStep, HookType, RetryPolicy, Retryable,
+        Step, StepConfig, StepName, StepOutput, WithHooks, WithTimeout, Workflow, WorkflowBuilder,
+        WorkflowError,
     };
 }

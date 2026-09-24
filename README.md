@@ -75,6 +75,56 @@ async fn main() {
 }
 ```
 
+## Closure Steps
+
+For small pieces of logic, define steps with closures instead of dedicated structs:
+
+```rust
+let workflow = Workflow::builder()
+    // Synchronous closure: quick, non-blocking logic
+    .add_fn("check", |ctx| {
+        let age = ctx.get::<u32>("age").copied().unwrap_or_default();
+        Ok(StepOutput::next(if age >= 18 { "adult" } else { "minor" }))
+    })
+    // Asynchronous closure: wrap an `async move` block with `Box::pin`
+    .add_async_fn("adult", |ctx| Box::pin(async move {
+        ctx.insert("group", "adult".to_string());
+        Ok(StepOutput::done())
+    }))
+    .add_fn("minor", |_ctx| Ok(StepOutput::done()))
+    .start_with("check")
+    .build()?;
+```
+
+`FnStep` and `AsyncFnStep` implement `Step`, so closures work with every builder method,
+including timeouts and retries, and can be mixed freely with struct-based steps:
+
+```rust
+let client = Arc::new(ApiClient::new());
+
+let fetch = AsyncFnStep::new("fetch", move |ctx| {
+    // The closure runs once per attempt, so clone captured handles first
+    let client = Arc::clone(&client);
+    Box::pin(async move {
+        let data = client.fetch().await.map_err(|e| WorkflowError::StepError {
+            step_name: StepName::new("fetch"),
+            details: e.to_string(),
+        })?;
+        ctx.insert("data", data);
+        Ok(StepOutput::next("save"))
+    })
+});
+
+let workflow = Workflow::builder()
+    .add_configured("fetch", fetch, StepConfig {
+        timeout: Some(Duration::from_secs(5)),
+        retry_policy: RetryPolicy::fixed(3, Duration::from_millis(100)),
+    })
+    .add_step("save", SaveStep)
+    .start_with("fetch")
+    .build()?;
+```
+
 ## Heterogeneous Context
 
 The context can store any type that implements `Send + Sync + 'static`:
@@ -163,6 +213,7 @@ See the [examples](crates/tsumugi/examples/) directory:
 
 ### Basic
 - [simple_workflow.rs](crates/tsumugi/examples/simple_workflow.rs) - Single-step workflow
+- [closure_workflow.rs](crates/tsumugi/examples/closure_workflow.rs) - Steps defined with closures
 - [order_workflow.rs](crates/tsumugi/examples/order_workflow.rs) - Multi-step with branching
 - [user_scoring_workflow.rs](crates/tsumugi/examples/user_scoring_workflow.rs) - Data processing
 
@@ -178,6 +229,7 @@ Run examples:
 ```bash
 # Basic
 cargo run -p tsumugi --example simple_workflow
+cargo run -p tsumugi --example closure_workflow
 
 # Real-world patterns
 cargo run -p tsumugi --example etl_api_to_csv
