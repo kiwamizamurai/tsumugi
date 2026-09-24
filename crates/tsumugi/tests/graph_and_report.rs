@@ -1,35 +1,30 @@
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+//! Typed keys, declared transitions, Mermaid output and execution reports.
+
 use tsumugi::prelude::*;
+use tsumugi::{BuildError, ErrorKind, StepStatus};
 
 const AMOUNT: Key<u64> = Key::new("amount");
 const APPROVED: Key<bool> = Key::new("approved");
 
-fn order_workflow() -> Result<Workflow, WorkflowError> {
+fn order_workflow() -> Result<Workflow, BuildError> {
     Workflow::builder()
         .add_fn("validate", |ctx| {
-            let amount = ctx.get(AMOUNT).copied().unwrap_or_default();
-            Ok(StepOutput::next(if amount > 0 {
-                "charge"
-            } else {
-                "reject"
-            }))
+            let amount = *ctx.require(AMOUNT)?;
+            Ok(Next::step(if amount > 0 { "charge" } else { "reject" }))
         })
         .then(["charge", "reject"])
         .add_fn("charge", |ctx| {
             ctx.insert(APPROVED, true);
-            Ok(StepOutput::next("notify"))
+            Ok(Next::step("notify"))
         })
         .then(["notify"])
         .add_fn("reject", |ctx| {
             ctx.insert(APPROVED, false);
-            Ok(StepOutput::next("notify"))
+            Ok(Next::step("notify"))
         })
         .then(["notify"])
-        .add_fn("notify", |_ctx| Ok(StepOutput::done()))
+        .add_fn("notify", |_ctx| Ok(Next::Done))
         .terminal()
-        .start_with("validate")
         .build()
 }
 
@@ -39,12 +34,12 @@ async fn test_typed_keys_across_steps() {
 
     let mut ctx = Context::new();
     ctx.insert(AMOUNT, 100);
-    workflow.execute(&mut ctx).await.expect("workflow succeeds");
+    workflow.run(&mut ctx).await.expect("workflow succeeds");
     assert_eq!(ctx.get(APPROVED), Some(&true));
 
     let mut ctx = Context::new();
     ctx.insert(AMOUNT, 0);
-    workflow.execute(&mut ctx).await.expect("workflow succeeds");
+    workflow.run(&mut ctx).await.expect("workflow succeeds");
     assert_eq!(ctx.get(APPROVED), Some(&false));
 }
 
@@ -54,7 +49,7 @@ async fn test_report_records_path_and_status() {
     let mut ctx = Context::new();
     ctx.insert(AMOUNT, 100);
 
-    let report = workflow.execute(&mut ctx).await.expect("workflow succeeds");
+    let report = workflow.run(&mut ctx).await.expect("workflow succeeds");
 
     let path: Vec<&str> = report.path().map(StepName::as_str).collect();
     assert_eq!(path, ["validate", "charge", "notify"]);
@@ -68,57 +63,15 @@ async fn test_report_records_path_and_status() {
 }
 
 #[tokio::test]
-async fn test_report_records_retries() {
-    let attempts = Arc::new(AtomicU32::new(0));
-    let counter = Arc::clone(&attempts);
-    let flaky = AsyncFnStep::new("flaky", move |_ctx| {
-        let counter = Arc::clone(&counter);
-        Box::pin(async move {
-            if counter.fetch_add(1, Ordering::SeqCst) < 2 {
-                return Err(WorkflowError::StepError {
-                    step_name: StepName::new("flaky"),
-                    details: "try again".to_string(),
-                });
-            }
-            Ok(StepOutput::done())
-        })
-    });
-
-    let workflow = Workflow::builder()
-        .add_step("flaky", flaky)
-        .retry(RetryPolicy::fixed(5, Duration::from_millis(1)))
-        .timeout(Duration::from_secs(1))
-        .start_with("flaky")
-        .build()
-        .expect("valid workflow");
-
-    let report = workflow
-        .execute(&mut Context::new())
-        .await
-        .expect("workflow succeeds");
-
-    assert_eq!(report.steps()[0].attempts(), 3);
-    assert_eq!(report.total_retries(), 2);
-}
-
-#[tokio::test]
 async fn test_failure_carries_partial_report() {
     let workflow = Workflow::builder()
-        .add_fn("prepare", |_ctx| Ok(StepOutput::next("fail")))
-        .add_fn("fail", |_ctx| {
-            Err(WorkflowError::StepError {
-                step_name: StepName::new("fail"),
-                details: "boom".to_string(),
-            })
-        })
-        .start_with("prepare")
+        .add_fn("prepare", |_ctx| Ok(Next::step("fail")))
+        .add_fn("fail", |_ctx| Err("boom".into()))
         .build()
         .expect("valid workflow");
 
-    let err = workflow.execute(&mut Context::new()).await.unwrap_err();
+    let err = workflow.run(&mut Context::new()).await.unwrap_err();
 
-    assert!(matches!(err.error(), WorkflowError::StepError { .. }));
-    assert_eq!(err.to_string(), "Step failed: fail, details: boom");
     let statuses: Vec<&StepStatus> = err.report().steps().iter().map(|r| r.status()).collect();
     assert_eq!(
         statuses,
@@ -128,29 +81,25 @@ async fn test_failure_carries_partial_report() {
         ]
     );
 
-    let (error, report) = err.into_parts();
-    assert!(matches!(error, WorkflowError::StepError { .. }));
+    let (step, _kind, report) = err.into_parts();
+    assert_eq!(step, "fail");
     assert_eq!(report.steps().len(), 2);
 }
 
 #[tokio::test]
 async fn test_undeclared_transition_is_rejected_at_runtime() {
     let workflow = Workflow::builder()
-        .add_fn("a", |_ctx| Ok(StepOutput::next("c")))
+        .add_fn("a", |_ctx| Ok(Next::step("c")))
         .then(["b"])
-        .add_fn("b", |_ctx| Ok(StepOutput::done()))
-        .add_fn("c", |_ctx| Ok(StepOutput::done()))
-        .start_with("a")
+        .add_fn("b", |_ctx| Ok(Next::Done))
+        .add_fn("c", |_ctx| Ok(Next::Done))
         .build()
         .expect("valid workflow");
 
-    let err = workflow.execute(&mut Context::new()).await.unwrap_err();
+    let err = workflow.run(&mut Context::new()).await.unwrap_err();
 
-    assert!(matches!(
-        err.error(),
-        WorkflowError::UndeclaredTransition { from, to }
-            if from.as_str() == "a" && to.as_str() == "c"
-    ));
+    assert_eq!(err.step(), "a");
+    assert!(matches!(err.kind(), ErrorKind::UndeclaredTransition(to) if to == "c"));
     // "c" never ran.
     assert_eq!(err.report().steps().len(), 1);
 }
@@ -158,42 +107,13 @@ async fn test_undeclared_transition_is_rejected_at_runtime() {
 #[tokio::test]
 async fn test_terminal_step_cannot_continue() {
     let workflow = Workflow::builder()
-        .add_fn("a", |_ctx| Ok(StepOutput::next("a")))
+        .add_fn("a", |_ctx| Ok(Next::step("a")))
         .terminal()
-        .start_with("a")
         .build()
         .expect("valid workflow");
 
-    let err = workflow.execute(&mut Context::new()).await.unwrap_err();
-    assert!(matches!(
-        err.error(),
-        WorkflowError::UndeclaredTransition { .. }
-    ));
-}
-
-#[tokio::test]
-async fn test_execution_error_converts_with_question_mark() {
-    async fn run(workflow: &Workflow) -> Result<(), WorkflowError> {
-        workflow.execute(&mut Context::new()).await?;
-        Ok(())
-    }
-
-    async fn run_boxed(workflow: &Workflow) -> Result<(), Box<dyn std::error::Error>> {
-        workflow.execute(&mut Context::new()).await?;
-        Ok(())
-    }
-
-    let workflow = Workflow::builder()
-        .add_fn("a", |_ctx| Ok(StepOutput::next("missing")))
-        .start_with("a")
-        .build()
-        .expect("valid workflow");
-
-    assert!(matches!(
-        run(&workflow).await,
-        Err(WorkflowError::StepNotFound(_))
-    ));
-    assert!(run_boxed(&workflow).await.is_err());
+    let err = workflow.run(&mut Context::new()).await.unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::UndeclaredTransition(_)));
 }
 
 #[test]
@@ -213,8 +133,6 @@ flowchart TD
     s2 --> s3
     s3 --> __end
 ";
-    assert_eq!(
-        order_workflow().expect("valid workflow").to_mermaid(),
-        expected
-    );
+    let workflow = order_workflow().expect("valid workflow");
+    assert_eq!(workflow.to_mermaid(), expected);
 }

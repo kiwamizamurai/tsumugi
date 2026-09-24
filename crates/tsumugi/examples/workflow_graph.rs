@@ -1,4 +1,5 @@
-//! Declared transitions, typed keys, Mermaid diagrams and execution reports.
+//! A workflow over a dedicated state type, with declared transitions, a
+//! Mermaid diagram and an execution report.
 //!
 //! Run with `--mermaid` to print the workflow diagram instead of executing it:
 //!
@@ -8,62 +9,67 @@
 //! ```
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 use tsumugi::prelude::*;
 
-// Typed keys: the compiler checks every read and write against the value type.
-const ORDER_TOTAL: Key<u64> = Key::new("order_total");
-const PAYMENT_ID: Key<String> = Key::new("payment_id");
-const REJECTION: Key<String> = Key::new("rejection");
+/// The state shared by all steps. Every field access is checked by the
+/// compiler, unlike a key-value `Context`.
+#[derive(Debug, Default)]
+struct Order {
+    total: u64,
+    payment_id: Option<String>,
+    rejection: Option<String>,
+}
 
-fn build_workflow() -> Result<Workflow, WorkflowError> {
-    let gateway_calls = Arc::new(AtomicU32::new(0));
+/// Simulated payment gateway that times out once before succeeding.
+#[derive(Default)]
+struct Charge {
+    calls: AtomicU32,
+}
 
-    // Simulated payment gateway that fails once before succeeding.
-    let charge = AsyncFnStep::new("charge", move |ctx| {
-        let gateway_calls = Arc::clone(&gateway_calls);
-        Box::pin(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            if gateway_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(WorkflowError::StepError {
-                    step_name: StepName::new("charge"),
-                    details: "gateway timeout".to_string(),
-                });
+#[async_trait]
+impl Step<Order> for Charge {
+    async fn run(&self, order: &mut Order) -> StepResult {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err("gateway timeout".into());
+        }
+        order.payment_id = Some(format!("pay_{}", order.total));
+        Ok(Next::step("ship"))
+    }
+
+    fn retry_policy(&self) -> RetryPolicy {
+        RetryPolicy::exponential(3, Duration::from_millis(50))
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(5))
+    }
+}
+
+fn build_workflow() -> Result<Workflow<Order>, tsumugi::BuildError> {
+    WorkflowBuilder::<Order>::new()
+        .add_fn("validate", |order| {
+            if order.total == 0 {
+                order.rejection = Some("empty order".to_string());
+                return Ok(Next::step("reject"));
             }
-            ctx.insert(PAYMENT_ID, "pay_42".to_string());
-            Ok(StepOutput::next("ship"))
-        })
-    });
-
-    Workflow::builder()
-        .add_fn("validate", |ctx| {
-            let total = ctx.get(ORDER_TOTAL).copied().unwrap_or_default();
-            if total == 0 {
-                ctx.insert(REJECTION, "empty order".to_string());
-                return Ok(StepOutput::next("reject"));
-            }
-            Ok(StepOutput::next("charge"))
+            Ok(Next::step("charge"))
         })
         // Declared transitions are validated when the workflow is built.
         .then(["charge", "reject"])
-        .add_step("charge", charge)
-        .retry(RetryPolicy::fixed(3, Duration::from_millis(50)))
-        .timeout(Duration::from_secs(5))
+        .add_step("charge", Charge::default())
         .then(["ship"])
-        .add_fn("ship", |ctx| {
-            let payment = ctx.get(PAYMENT_ID).cloned().unwrap_or_default();
-            println!("Shipping order paid with {}", payment);
-            Ok(StepOutput::done())
+        .add_fn("ship", |order| {
+            println!("Shipping order paid with {:?}", order.payment_id);
+            Ok(Next::Done)
         })
         .terminal()
-        .add_fn("reject", |ctx| {
-            let reason = ctx.get(REJECTION).cloned().unwrap_or_default();
-            println!("Order rejected: {}", reason);
-            Ok(StepOutput::done())
+        .add_fn("reject", |order| {
+            println!("Order rejected: {:?}", order.rejection);
+            Ok(Next::Done)
         })
         .terminal()
-        .start_with("validate")
         .build()
 }
 
@@ -76,10 +82,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let mut ctx = Context::new();
-    ctx.insert(ORDER_TOTAL, 4_980);
+    let mut order = Order {
+        total: 4_980,
+        ..Order::default()
+    };
 
-    match workflow.execute(&mut ctx).await {
+    match workflow.run(&mut order).await {
         Ok(report) => println!("\n{}", report),
         Err(err) => {
             eprintln!("Workflow failed: {}\n\n{}", err, err.report());

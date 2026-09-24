@@ -1,13 +1,10 @@
 //! Closure-based steps.
 //!
-//! [`FnStep`] and [`AsyncFnStep`] let you define a step from a closure instead of
-//! a dedicated struct with a manual [`Step`] implementation. Both implement
-//! [`Step`], so they can be registered with any `WorkflowBuilder` method,
-//! including ones that configure timeouts and retry policies.
+//! [`FnStep`] and [`AsyncFnStep`] turn closures into [`Step`]s. Workflow
+//! builders usually create them for you (`add_fn` and `add_async_fn`); use
+//! these types directly to store or pass around closure steps.
 
-use crate::context::Context;
-use crate::error::WorkflowError;
-use crate::step::{Step, StepName, StepOutput};
+use crate::step::{Step, StepResult};
 use async_trait::async_trait;
 use std::fmt;
 use std::future::Future;
@@ -31,63 +28,50 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// # Examples
 ///
 /// ```
-/// use tsumugi_core::{Context, FnStep, Step, StepOutput};
+/// use tsumugi_core::{Context, FnStep, Next};
 ///
-/// let step = FnStep::new("double", |ctx: &mut Context| {
-///     let value = ctx.get::<i32>("value").copied().unwrap_or_default();
-///     ctx.insert("value", value * 2);
-///     Ok(StepOutput::done())
+/// let step = FnStep::new(|ctx: &mut Context| {
+///     let value = ctx.require::<i32>("value")?;
+///     ctx.insert("doubled", value * 2);
+///     Ok(Next::Done)
 /// });
-///
-/// assert_eq!(step.name().as_str(), "double");
 /// ```
-pub struct FnStep<F> {
-    name: StepName,
-    func: F,
-}
+pub struct FnStep<F>(F);
 
-impl<F> FnStep<F>
-where
-    F: Fn(&mut Context) -> Result<StepOutput, WorkflowError> + Send + Sync,
-{
-    /// Creates a new step from a synchronous closure.
-    pub fn new(name: impl Into<StepName>, func: F) -> Self {
-        Self {
-            name: name.into(),
-            func,
-        }
+impl<F> FnStep<F> {
+    /// Creates a step from a synchronous closure.
+    pub fn new<S>(func: F) -> Self
+    where
+        F: Fn(&mut S) -> StepResult,
+    {
+        Self(func)
     }
 }
 
 impl<F> fmt::Debug for FnStep<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FnStep")
-            .field("name", &self.name)
-            .finish_non_exhaustive()
+        f.write_str("FnStep(..)")
     }
 }
 
 #[async_trait]
-impl<F> Step for FnStep<F>
+impl<S, F> Step<S> for FnStep<F>
 where
-    F: Fn(&mut Context) -> Result<StepOutput, WorkflowError> + Send + Sync,
+    S: Send,
+    F: Fn(&mut S) -> StepResult + Send + Sync,
 {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
-        (self.func)(ctx)
-    }
-
-    fn name(&self) -> StepName {
-        self.name.clone()
+    async fn run(&self, state: &mut S) -> StepResult {
+        (self.0)(state)
     }
 }
 
 /// A step backed by an asynchronous closure.
 ///
-/// The closure receives the context and returns a [`BoxFuture`] that may borrow
-/// it, so the step can read and write the context across `.await` points:
+/// The closure receives the state and returns a [`BoxFuture`] that may borrow
+/// it, so the step can read and write the state across `.await` points:
 ///
-/// ```ignore
-/// |ctx| Box::pin(async move { /* use ctx */ Ok(StepOutput::done()) })
+/// ```text
+/// |ctx| Box::pin(async move { /* use ctx */ Ok(Next::Done) })
 /// ```
 ///
 /// The closure may be called more than once when a retry policy is configured,
@@ -97,82 +81,40 @@ where
 /// # Examples
 ///
 /// ```
-/// use tsumugi_core::{AsyncFnStep, Context, Step, StepOutput};
+/// use tsumugi_core::{AsyncFnStep, Context, Next};
 ///
-/// let step = AsyncFnStep::new("greet", |ctx: &mut Context| {
+/// let step = AsyncFnStep::new(|ctx: &mut Context| {
 ///     Box::pin(async move {
 ///         ctx.insert("greeting", "hello".to_string());
-///         Ok(StepOutput::done())
+///         Ok(Next::Done)
 ///     })
 /// });
-///
-/// assert_eq!(step.name().as_str(), "greet");
 /// ```
-pub struct AsyncFnStep<F> {
-    name: StepName,
-    func: F,
-}
+pub struct AsyncFnStep<F>(F);
 
-impl<F> AsyncFnStep<F>
-where
-    F: for<'a> Fn(&'a mut Context) -> BoxFuture<'a, Result<StepOutput, WorkflowError>>
-        + Send
-        + Sync,
-{
-    /// Creates a new step from an asynchronous closure.
-    pub fn new(name: impl Into<StepName>, func: F) -> Self {
-        Self {
-            name: name.into(),
-            func,
-        }
+impl<F> AsyncFnStep<F> {
+    /// Creates a step from an asynchronous closure.
+    pub fn new<S>(func: F) -> Self
+    where
+        F: for<'a> Fn(&'a mut S) -> BoxFuture<'a, StepResult>,
+    {
+        Self(func)
     }
 }
 
 impl<F> fmt::Debug for AsyncFnStep<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AsyncFnStep")
-            .field("name", &self.name)
-            .finish_non_exhaustive()
+        f.write_str("AsyncFnStep(..)")
     }
 }
 
 #[async_trait]
-impl<F> Step for AsyncFnStep<F>
+impl<S, F> Step<S> for AsyncFnStep<F>
 where
-    F: for<'a> Fn(&'a mut Context) -> BoxFuture<'a, Result<StepOutput, WorkflowError>>
-        + Send
-        + Sync,
+    S: Send,
+    F: for<'a> Fn(&'a mut S) -> BoxFuture<'a, StepResult> + Send + Sync,
 {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
-        (self.func)(ctx).await
-    }
-
-    fn name(&self) -> StepName {
-        self.name.clone()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_fn_step_debug() {
-        let step = FnStep::new("sync", |_ctx: &mut Context| Ok(StepOutput::done()));
-        assert_eq!(
-            format!("{:?}", step),
-            "FnStep { name: StepName(\"sync\"), .. }"
-        );
-    }
-
-    #[test]
-    fn test_async_fn_step_debug() {
-        let step = AsyncFnStep::new("async", |_ctx: &mut Context| {
-            Box::pin(async move { Ok(StepOutput::done()) })
-        });
-        assert_eq!(
-            format!("{:?}", step),
-            "AsyncFnStep { name: StepName(\"async\"), .. }"
-        );
+    async fn run(&self, state: &mut S) -> StepResult {
+        (self.0)(state).await
     }
 }

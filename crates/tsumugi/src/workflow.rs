@@ -1,32 +1,65 @@
-//! Workflow engine for executing steps.
+//! Workflow definition and execution.
 
-use crate::report::{ExecutionError, ExecutionReport, StepRecord, StepStatus};
+use crate::error::{BuildError, ErrorKind, ExecutionError};
+use crate::report::{ExecutionReport, StepRecord, StepStatus};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use tsumugi_core::{
-    AsyncFnStep, BoxFuture, Context, FnStep, HookType, RetryPolicy, Step, StepName, StepOutput,
-    WorkflowError,
+    AsyncFnStep, BoxFuture, Context, Failure, FnStep, Next, RetryPolicy, Step, StepName, StepResult,
 };
 
-/// A workflow engine that executes a series of steps.
+/// A validated set of steps and the transitions between them, operating on a
+/// state of type `S`.
 ///
-/// Steps are identified by the name they are registered under. Execution
-/// starts at the start step and follows the [`StepOutput`] returned by each
-/// step until one completes the workflow or fails.
-pub struct Workflow {
+/// Workflows are built with [`Workflow::builder`] (for the default
+/// [`Context`] state) or [`WorkflowBuilder::new`] (for a custom state type),
+/// and can be run any number of times, concurrently if needed.
+///
+/// # Examples
+///
+/// Using a dedicated state type:
+///
+/// ```
+/// use tsumugi::prelude::*;
+///
+/// #[derive(Default)]
+/// struct Signup {
+///     email: String,
+///     valid: bool,
+/// }
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let workflow = WorkflowBuilder::<Signup>::new()
+///     .add_fn("validate", |signup| {
+///         signup.valid = signup.email.contains('@');
+///         Ok(if signup.valid { Next::step("welcome") } else { Next::Done })
+///     })
+///     .then(["welcome"])
+///     .add_fn("welcome", |_signup| Ok(Next::Done))
+///     .terminal()
+///     .build()?;
+///
+/// let mut signup = Signup { email: "alice@example.com".into(), ..Default::default() };
+/// workflow.run(&mut signup).await?;
+/// assert!(signup.valid);
+/// # Ok(())
+/// # }
+/// ```
+pub struct Workflow<S = Context> {
     /// Steps in registration order.
-    pub(crate) steps: Vec<StepEntry>,
+    pub(crate) steps: Vec<StepEntry<S>>,
     /// Maps step names to their position in `steps`.
     pub(crate) index: HashMap<StepName, usize>,
     /// Position of the start step in `steps`.
     pub(crate) start: usize,
 }
 
-pub(crate) struct StepEntry {
+pub(crate) struct StepEntry<S> {
     pub(crate) name: StepName,
-    step: Box<dyn Step>,
+    step: Box<dyn Step<S>>,
     timeout: Option<Duration>,
     retry_policy: RetryPolicy,
     /// Declared successor steps. `None` means undeclared (any transition is
@@ -34,7 +67,7 @@ pub(crate) struct StepEntry {
     pub(crate) transitions: Option<Vec<StepName>>,
 }
 
-impl fmt::Debug for Workflow {
+impl<S: Send> fmt::Debug for Workflow<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Workflow")
             .field("steps", &self.step_names().collect::<Vec<_>>())
@@ -44,17 +77,21 @@ impl fmt::Debug for Workflow {
 }
 
 impl Workflow {
-    /// Creates a new workflow builder.
+    /// Creates a builder for a workflow using the default [`Context`] state.
+    ///
+    /// Use [`WorkflowBuilder::new`] for a custom state type.
     pub fn builder() -> WorkflowBuilder {
         WorkflowBuilder::new()
     }
+}
 
+impl<S: Send> Workflow<S> {
     /// Returns the name of the start step.
     pub fn start_step(&self) -> &StepName {
         &self.steps[self.start].name
     }
 
-    /// Returns an iterator over all registered step names in registration order.
+    /// Returns the names of all steps in registration order.
     pub fn step_names(&self) -> impl Iterator<Item = &StepName> {
         self.steps.iter().map(|entry| &entry.name)
     }
@@ -64,16 +101,11 @@ impl Workflow {
         self.index.contains_key(name)
     }
 
-    /// Returns the number of registered steps.
-    pub fn step_count(&self) -> usize {
-        self.steps.len()
-    }
-
-    /// Executes the workflow starting from the configured start step.
+    /// Runs the workflow on `state`, starting from the start step.
     ///
     /// On success, returns an [`ExecutionReport`] describing the executed
-    /// steps. On failure, returns an [`ExecutionError`] holding the error that
-    /// stopped the workflow and the report up to that point.
+    /// steps. On failure, returns an [`ExecutionError`] identifying the failed
+    /// step, the cause and the report up to that point.
     ///
     /// # Examples
     ///
@@ -81,129 +113,106 @@ impl Workflow {
     /// use tsumugi::prelude::*;
     ///
     /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() {
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let workflow = Workflow::builder()
     ///     .add_fn("hello", |ctx| {
     ///         ctx.insert("message", "hello".to_string());
-    ///         Ok(StepOutput::done())
+    ///         Ok(Next::Done)
     ///     })
-    ///     .start_with("hello")
-    ///     .build()
-    ///     .expect("valid workflow");
+    ///     .build()?;
     ///
     /// let mut ctx = Context::new();
-    /// match workflow.execute(&mut ctx).await {
-    ///     Ok(report) => println!("{}", report),
-    ///     Err(err) => eprintln!("failed: {}\n{}", err, err.report()),
-    /// }
+    /// let report = workflow.run(&mut ctx).await?;
+    /// println!("{}", report);
+    /// # Ok(())
     /// # }
     /// ```
-    pub async fn execute(&self, ctx: &mut Context) -> Result<ExecutionReport, ExecutionError> {
+    pub async fn run(&self, state: &mut S) -> Result<ExecutionReport, ExecutionError> {
         let started = Instant::now();
         let mut report = ExecutionReport::default();
         let mut current = self.start;
 
         loop {
             let entry = &self.steps[current];
-            let (record, result) = Self::execute_step(entry, ctx).await;
+            let (record, result) = Self::run_step(entry, state).await;
             report.steps.push(record);
             report.duration = started.elapsed();
 
             let next = match result {
-                Ok(StepOutput::Continue(next)) => next,
-                Ok(StepOutput::Complete) => return Ok(report),
-                Err(error) => return Err(ExecutionError::new(error, report)),
+                Ok(Next::Step(next)) => next,
+                Ok(Next::Done) => return Ok(report),
+                Err(kind) => return Err(ExecutionError::new(entry.name.clone(), kind, report)),
             };
 
             if let Some(allowed) = &entry.transitions {
                 if !allowed.contains(&next) {
-                    let error = WorkflowError::UndeclaredTransition {
-                        from: entry.name.clone(),
-                        to: next,
-                    };
-                    return Err(ExecutionError::new(error, report));
+                    let kind = ErrorKind::UndeclaredTransition(next);
+                    return Err(ExecutionError::new(entry.name.clone(), kind, report));
                 }
             }
 
             current = match self.index.get(&next) {
                 Some(&i) => i,
                 None => {
-                    return Err(ExecutionError::new(
-                        WorkflowError::StepNotFound(next),
-                        report,
-                    ))
+                    let kind = ErrorKind::UnknownStep(next);
+                    return Err(ExecutionError::new(entry.name.clone(), kind, report));
                 }
             };
         }
     }
 
-    /// Executes a single step, retrying according to its policy, and runs its
-    /// lifecycle hooks.
-    async fn execute_step(
-        entry: &StepEntry,
-        ctx: &mut Context,
-    ) -> (StepRecord, Result<StepOutput, WorkflowError>) {
+    /// Runs a single step with retries and hooks.
+    async fn run_step(
+        entry: &StepEntry<S>,
+        state: &mut S,
+    ) -> (StepRecord, Result<Next, ErrorKind>) {
         let started = Instant::now();
         let max_retries = entry.retry_policy.max_retries();
         let mut attempts = 0;
 
-        let result = loop {
+        let outcome = loop {
             attempts += 1;
-            let error = match Self::execute_attempt(entry, ctx).await {
-                Ok(output) => break Ok(output),
-                Err(error) => error,
+            let failure = match Self::run_attempt(entry, state).await {
+                Ok(next) => break Ok(next),
+                Err(failure) => failure,
             };
 
-            let retries = attempts - 1;
-            if retries >= max_retries {
-                break Err(error);
+            let retry = attempts - 1;
+            if retry >= max_retries {
+                break Err(failure);
             }
 
             info!(
                 "Step '{}' failed ({}), retrying ({}/{})",
-                entry.name, error, attempts, max_retries
+                entry.name, failure, attempts, max_retries
             );
-            if let Some(delay) = entry.retry_policy.delay_for_attempt(retries) {
-                tokio::time::sleep(delay).await;
-            }
+            tokio::time::sleep(entry.retry_policy.delay(retry)).await;
         };
 
-        let result = match result {
-            Ok(output) => match entry.step.on_success(ctx).await {
+        let result = match outcome {
+            Ok(next) => match entry.step.on_success(state).await {
                 Ok(()) => {
-                    info!("Step '{}' completed successfully", entry.name);
-                    Ok(output)
+                    info!("Step '{}' completed", entry.name);
+                    Ok(next)
                 }
-                Err(hook_error) => {
-                    warn!(
-                        "Step '{}' on_success hook failed: {}",
-                        entry.name, hook_error
-                    );
-                    Err(WorkflowError::HookError {
-                        step_name: entry.name.clone(),
-                        hook_type: HookType::OnSuccess,
-                        details: hook_error.to_string(),
-                    })
+                Err(error) => {
+                    warn!("Step '{}' on_success hook failed: {}", entry.name, error);
+                    Err(ErrorKind::Hook(error))
                 }
             },
-            Err(error) => {
+            Err(failure) => {
                 warn!(
                     "Step '{}' failed after {} attempt(s): {}",
-                    entry.name, attempts, error
+                    entry.name, attempts, failure
                 );
-                if let Err(hook_error) = entry.step.on_failure(ctx, &error).await {
-                    warn!(
-                        "Step '{}' on_failure hook failed: {}",
-                        entry.name, hook_error
-                    );
-                }
-                Err(error)
+                entry.step.on_failure(state, &failure).await;
+                Err(ErrorKind::Step(failure))
             }
         };
 
         let status = match &result {
-            Ok(StepOutput::Continue(next)) => StepStatus::Continued(next.clone()),
-            Ok(StepOutput::Complete) => StepStatus::Completed,
+            Ok(Next::Step(next)) => StepStatus::Continued(next.clone()),
+            Ok(Next::Done) => StepStatus::Completed,
             Err(_) => StepStatus::Failed,
         };
         let record = StepRecord {
@@ -216,65 +225,106 @@ impl Workflow {
     }
 
     /// Runs one attempt of a step, applying its timeout if any.
-    async fn execute_attempt(
-        entry: &StepEntry,
-        ctx: &mut Context,
-    ) -> Result<StepOutput, WorkflowError> {
-        match entry.timeout {
-            Some(limit) => tokio::time::timeout(limit, entry.step.execute(ctx))
-                .await
-                .unwrap_or_else(|_| {
-                    Err(WorkflowError::Timeout {
-                        step_name: entry.name.clone(),
-                    })
-                }),
-            None => entry.step.execute(ctx).await,
+    async fn run_attempt(entry: &StepEntry<S>, state: &mut S) -> Result<Next, Failure> {
+        let result: StepResult = match entry.timeout {
+            Some(limit) => match tokio::time::timeout(limit, entry.step.run(state)).await {
+                Ok(result) => result,
+                Err(_) => return Err(Failure::Timeout(limit)),
+            },
+            None => entry.step.run(state).await,
+        };
+        result.map_err(Failure::Error)
+    }
+
+    /// Returns the first step (in registration order) that cannot be reached
+    /// from the start step.
+    ///
+    /// Returns `None` if every step is reachable, or if reachability cannot be
+    /// determined because a reachable step has undeclared transitions.
+    fn find_unreachable_step(&self) -> Option<&StepName> {
+        let mut visited = HashSet::from([self.start]);
+        let mut queue = VecDeque::from([self.start]);
+
+        while let Some(i) = queue.pop_front() {
+            // An undeclared step may continue anywhere.
+            let targets = self.steps[i].transitions.as_ref()?;
+            for target in targets {
+                let j = self.index[target];
+                if visited.insert(j) {
+                    queue.push_back(j);
+                }
+            }
         }
+
+        self.steps
+            .iter()
+            .enumerate()
+            .find(|(i, _)| !visited.contains(i))
+            .map(|(_, entry)| &entry.name)
     }
 }
 
-/// Builder for constructing [`Workflow`] instances.
+/// Builder for a [`Workflow`] operating on a state of type `S`.
 ///
-/// Configuration mistakes (such as calling [`then`](Self::then) before adding
-/// a step) are collected and reported by [`build`](Self::build).
-#[derive(Default)]
-pub struct WorkflowBuilder {
-    steps: Vec<StepEntry>,
+/// Steps are added with [`add_step`](Self::add_step), [`add_fn`](Self::add_fn)
+/// and [`add_async_fn`](Self::add_async_fn). The modifiers
+/// [`retry`](Self::retry), [`timeout`](Self::timeout),
+/// [`no_timeout`](Self::no_timeout), [`then`](Self::then) and
+/// [`terminal`](Self::terminal) configure the most recently added step:
+///
+/// ```
+/// use std::time::Duration;
+/// use tsumugi::prelude::*;
+///
+/// let workflow = Workflow::builder()
+///     .add_fn("fetch", |_ctx| Ok(Next::step("save")))
+///     .retry(RetryPolicy::exponential(3, Duration::from_millis(100)))
+///     .timeout(Duration::from_secs(5))
+///     .then(["save"])
+///     .add_fn("save", |_ctx| Ok(Next::Done))
+///     .terminal()
+///     .build();
+///
+/// assert!(workflow.is_ok());
+/// ```
+///
+/// The first step added is the start step unless
+/// [`start_with`](Self::start_with) says otherwise. Configuration mistakes are
+/// reported by [`build`](Self::build).
+pub struct WorkflowBuilder<S = Context> {
+    steps: Vec<StepEntry<S>>,
     start_step: Option<StepName>,
-    errors: Vec<WorkflowError>,
+    errors: Vec<BuildError>,
 }
 
-impl WorkflowBuilder {
-    /// Creates a new empty workflow builder.
-    pub fn new() -> Self {
-        Self::default()
+impl<S: Send> Default for WorkflowBuilder<S> {
+    fn default() -> Self {
+        Self::new()
     }
+}
 
-    /// Returns the most recently added step, recording a configuration error
-    /// if there is none.
-    fn last_step(&mut self, method: &str) -> Option<&mut StepEntry> {
-        if self.steps.is_empty() {
-            self.errors.push(WorkflowError::Configuration(format!(
-                "`{}` must be called after adding a step",
-                method
-            )));
+impl<S: Send> WorkflowBuilder<S> {
+    /// Creates an empty builder.
+    ///
+    /// For the default [`Context`] state, [`Workflow::builder`] is shorter.
+    pub fn new() -> Self {
+        Self {
+            steps: Vec::new(),
+            start_step: None,
+            errors: Vec::new(),
         }
-        self.steps.last_mut()
     }
 
     /// Adds a step under the given name.
     ///
     /// The step's own [`retry_policy`](Step::retry_policy) and
-    /// [`timeout`](Step::timeout) are used unless overridden with
+    /// [`timeout`](Step::timeout) apply unless overridden with
     /// [`retry`](Self::retry), [`timeout`](Self::timeout) or
     /// [`no_timeout`](Self::no_timeout).
-    ///
-    /// The name identifies the step within the workflow: it is the target of
-    /// [`StepOutput::next`] and appears in logs, errors and reports.
-    pub fn add_step<S: Step + 'static>(mut self, name: impl Into<StepName>, step: S) -> Self {
+    pub fn add_step(mut self, name: impl Into<StepName>, step: impl Step<S> + 'static) -> Self {
         let name = name.into();
         if self.steps.iter().any(|entry| entry.name == name) {
-            self.errors.push(WorkflowError::DuplicateStep(name));
+            self.errors.push(BuildError::DuplicateStep(name));
             return self;
         }
         self.steps.push(StepEntry {
@@ -287,10 +337,7 @@ impl WorkflowBuilder {
         self
     }
 
-    /// Adds a step backed by a synchronous closure.
-    ///
-    /// Shorthand for `add_step(name, FnStep::new(name, func))`. See [`FnStep`]
-    /// for details.
+    /// Adds a step backed by a synchronous closure. See [`FnStep`].
     ///
     /// # Examples
     ///
@@ -299,79 +346,58 @@ impl WorkflowBuilder {
     ///
     /// let workflow = Workflow::builder()
     ///     .add_fn("check", |ctx| {
-    ///         let age = ctx.get::<u32>("age").copied().unwrap_or_default();
-    ///         Ok(StepOutput::next(if age >= 18 { "adult" } else { "minor" }))
+    ///         let age = *ctx.require::<u32>("age")?;
+    ///         Ok(Next::step(if age >= 18 { "adult" } else { "minor" }))
     ///     })
-    ///     .add_fn("adult", |_ctx| Ok(StepOutput::done()))
-    ///     .add_fn("minor", |_ctx| Ok(StepOutput::done()))
-    ///     .start_with("check")
+    ///     .add_fn("adult", |_ctx| Ok(Next::Done))
+    ///     .add_fn("minor", |_ctx| Ok(Next::Done))
     ///     .build();
     ///
     /// assert!(workflow.is_ok());
     /// ```
     pub fn add_fn<F>(self, name: impl Into<StepName>, func: F) -> Self
     where
-        F: Fn(&mut Context) -> Result<StepOutput, WorkflowError> + Send + Sync + 'static,
+        F: Fn(&mut S) -> StepResult + Send + Sync + 'static,
     {
-        let step_name = name.into();
-        let step = FnStep::new(step_name.clone(), func);
-        self.add_step(step_name, step)
+        self.add_step(name, FnStep::new(func))
     }
 
-    /// Adds a step backed by an asynchronous closure.
-    ///
-    /// Shorthand for `add_step(name, AsyncFnStep::new(name, func))`. See
-    /// [`AsyncFnStep`] for details.
+    /// Adds a step backed by an asynchronous closure. See [`AsyncFnStep`].
     ///
     /// # Examples
     ///
     /// ```
-    /// use std::time::Duration;
     /// use tsumugi::prelude::*;
     ///
     /// let workflow = Workflow::builder()
     ///     .add_async_fn("fetch", |ctx| {
     ///         Box::pin(async move {
     ///             ctx.insert("body", "fetched".to_string());
-    ///             Ok(StepOutput::done())
+    ///             Ok(Next::Done)
     ///         })
     ///     })
-    ///     .retry(RetryPolicy::fixed(3, Duration::from_millis(100)))
-    ///     .timeout(Duration::from_secs(5))
-    ///     .start_with("fetch")
     ///     .build();
     ///
     /// assert!(workflow.is_ok());
     /// ```
     pub fn add_async_fn<F>(self, name: impl Into<StepName>, func: F) -> Self
     where
-        F: for<'a> Fn(&'a mut Context) -> BoxFuture<'a, Result<StepOutput, WorkflowError>>
-            + Send
-            + Sync
-            + 'static,
+        F: for<'a> Fn(&'a mut S) -> BoxFuture<'a, StepResult> + Send + Sync + 'static,
     {
-        let step_name = name.into();
-        let step = AsyncFnStep::new(step_name.clone(), func);
-        self.add_step(step_name, step)
+        self.add_step(name, AsyncFnStep::new(func))
+    }
+
+    /// Returns the most recently added step, recording an error if there is
+    /// none.
+    fn last_step(&mut self, method: &'static str) -> Option<&mut StepEntry<S>> {
+        if self.steps.is_empty() {
+            self.errors.push(BuildError::ModifierWithoutStep(method));
+        }
+        self.steps.last_mut()
     }
 
     /// Sets the retry policy of the most recently added step, overriding
     /// [`Step::retry_policy`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::time::Duration;
-    /// use tsumugi::prelude::*;
-    ///
-    /// let workflow = Workflow::builder()
-    ///     .add_fn("flaky", |_ctx| Ok(StepOutput::done()))
-    ///     .retry(RetryPolicy::exponential(5, Duration::from_millis(100)))
-    ///     .start_with("flaky")
-    ///     .build();
-    ///
-    /// assert!(workflow.is_ok());
-    /// ```
     pub fn retry(mut self, policy: RetryPolicy) -> Self {
         if let Some(entry) = self.last_step("retry") {
             entry.retry_policy = policy;
@@ -405,30 +431,12 @@ impl WorkflowBuilder {
     /// - detection of unreachable steps (when all reachable steps declare
     ///   their transitions),
     /// - a runtime check that the step only continues to a declared target
-    ///   ([`WorkflowError::UndeclaredTransition`]),
+    ///   ([`ErrorKind::UndeclaredTransition`]),
     /// - edges in the [Mermaid diagram](Workflow::to_mermaid).
     ///
-    /// Completing the workflow with [`StepOutput::done`] is always allowed.
-    /// Use [`terminal`](Self::terminal) for steps that never continue.
-    /// Calling `then` again on the same step adds more targets.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tsumugi::prelude::*;
-    ///
-    /// let workflow = Workflow::builder()
-    ///     .add_fn("validate", |_ctx| Ok(StepOutput::next("save")))
-    ///     .then(["save", "reject"])
-    ///     .add_fn("save", |_ctx| Ok(StepOutput::done()))
-    ///     .terminal()
-    ///     .add_fn("reject", |_ctx| Ok(StepOutput::done()))
-    ///     .terminal()
-    ///     .start_with("validate")
-    ///     .build();
-    ///
-    /// assert!(workflow.is_ok());
-    /// ```
+    /// Completing the workflow with [`Next::Done`] is always allowed. Use
+    /// [`terminal`](Self::terminal) for steps that never continue. Calling
+    /// `then` again on the same step adds more targets.
     pub fn then<I>(mut self, targets: I) -> Self
     where
         I: IntoIterator,
@@ -447,8 +455,8 @@ impl WorkflowBuilder {
     /// step, i.e. it always completes or fails the workflow.
     ///
     /// The step then counts as having declared transitions (none), so it takes
-    /// part in build-time validation and continuing from it at runtime fails
-    /// with [`WorkflowError::UndeclaredTransition`].
+    /// part in build-time validation, and continuing from it at runtime fails
+    /// with [`ErrorKind::UndeclaredTransition`].
     pub fn terminal(mut self) -> Self {
         let mut conflict = None;
         if let Some(entry) = self.last_step("terminal") {
@@ -458,41 +466,26 @@ impl WorkflowBuilder {
             }
         }
         if let Some(name) = conflict {
-            self.errors.push(WorkflowError::Configuration(format!(
-                "step '{}' is declared terminal but has transitions",
-                name
-            )));
+            self.errors.push(BuildError::TerminalWithTransitions(name));
         }
         self
     }
 
-    /// Sets the start step by name.
-    pub fn start_with(mut self, step_name: impl Into<StepName>) -> Self {
-        self.start_step = Some(step_name.into());
+    /// Sets the start step. Defaults to the first step added.
+    pub fn start_with(mut self, name: impl Into<StepName>) -> Self {
+        self.start_step = Some(name.into());
         self
     }
 
-    /// Builds the workflow.
+    /// Validates the definition and builds the workflow.
     ///
     /// # Errors
     ///
-    /// Returns the first configuration problem found:
-    ///
-    /// - [`WorkflowError::Configuration`] if no start step was set or a
-    ///   builder method was misused,
-    /// - [`WorkflowError::DuplicateStep`] if a name was registered twice,
-    /// - [`WorkflowError::StepNotFound`] if the start step does not exist,
-    /// - [`WorkflowError::UnknownTransitionTarget`] if a declared transition
-    ///   points to a step that does not exist,
-    /// - [`WorkflowError::UnreachableStep`] if a step can never be reached.
-    pub fn build(self) -> Result<Workflow, WorkflowError> {
+    /// Returns the first problem found; see [`BuildError`].
+    pub fn build(self) -> Result<Workflow<S>, BuildError> {
         if let Some(error) = self.errors.into_iter().next() {
             return Err(error);
         }
-
-        let start_step = self.start_step.ok_or_else(|| {
-            WorkflowError::Configuration("Start step must be specified".to_string())
-        })?;
 
         let index: HashMap<StepName, usize> = self
             .steps
@@ -501,14 +494,16 @@ impl WorkflowBuilder {
             .map(|(i, entry)| (entry.name.clone(), i))
             .collect();
 
-        let start = *index
-            .get(&start_step)
-            .ok_or(WorkflowError::StepNotFound(start_step))?;
+        let start = match self.start_step {
+            Some(name) => *index.get(&name).ok_or(BuildError::UnknownStartStep(name))?,
+            None if self.steps.is_empty() => return Err(BuildError::Empty),
+            None => 0,
+        };
 
         for entry in &self.steps {
             for target in entry.transitions.iter().flatten() {
                 if !index.contains_key(target) {
-                    return Err(WorkflowError::UnknownTransitionTarget {
+                    return Err(BuildError::UnknownTransition {
                         from: entry.name.clone(),
                         to: target.clone(),
                     });
@@ -523,39 +518,10 @@ impl WorkflowBuilder {
         };
 
         if let Some(unreachable) = workflow.find_unreachable_step() {
-            return Err(WorkflowError::UnreachableStep(unreachable.clone()));
+            return Err(BuildError::UnreachableStep(unreachable.clone()));
         }
 
         Ok(workflow)
-    }
-}
-
-impl Workflow {
-    /// Returns the first step (in registration order) that cannot be reached
-    /// from the start step.
-    ///
-    /// Returns `None` if every step is reachable, or if reachability cannot be
-    /// determined because a reachable step has undeclared transitions.
-    fn find_unreachable_step(&self) -> Option<&StepName> {
-        let mut visited = HashSet::from([self.start]);
-        let mut queue = VecDeque::from([self.start]);
-
-        while let Some(i) = queue.pop_front() {
-            // An undeclared step may continue anywhere.
-            let targets = self.steps[i].transitions.as_ref()?;
-            for target in targets {
-                let j = self.index[target];
-                if visited.insert(j) {
-                    queue.push_back(j);
-                }
-            }
-        }
-
-        self.steps
-            .iter()
-            .enumerate()
-            .find(|(i, _)| !visited.contains(i))
-            .map(|(_, entry)| &entry.name)
     }
 }
 
@@ -564,44 +530,38 @@ mod tests {
     use super::*;
     use tsumugi_core::async_trait;
 
-    #[derive(Debug)]
     struct SuccessStep;
 
     #[async_trait]
     impl Step for SuccessStep {
-        async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+        async fn run(&self, ctx: &mut Context) -> StepResult {
             ctx.insert("success", true);
-            Ok(StepOutput::done())
+            Ok(Next::Done)
         }
     }
 
-    #[derive(Debug)]
     struct FailureStep;
 
     #[async_trait]
     impl Step for FailureStep {
-        async fn execute(&self, _ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
-            Err(WorkflowError::StepError {
-                step_name: StepName::new("failure"),
-                details: "Intentional failure".to_string(),
-            })
+        async fn run(&self, _ctx: &mut Context) -> StepResult {
+            Err("intentional failure".into())
         }
     }
 
-    fn done(_ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
-        Ok(StepOutput::done())
+    fn done(_ctx: &mut Context) -> StepResult {
+        Ok(Next::Done)
     }
 
     #[tokio::test]
     async fn test_workflow_success() {
         let workflow = Workflow::builder()
             .add_step("success", SuccessStep)
-            .start_with("success")
             .build()
             .expect("valid workflow");
 
         let mut ctx = Context::new();
-        let report = workflow.execute(&mut ctx).await.expect("workflow succeeds");
+        let report = workflow.run(&mut ctx).await.expect("workflow succeeds");
         assert_eq!(ctx.get::<bool>("success"), Some(&true));
         assert_eq!(report.steps().len(), 1);
         assert_eq!(report.steps()[0].status(), &StepStatus::Completed);
@@ -611,20 +571,42 @@ mod tests {
     async fn test_workflow_failure() {
         let workflow = Workflow::builder()
             .add_step("failure", FailureStep)
-            .start_with("failure")
             .build()
             .expect("valid workflow");
 
-        let mut ctx = Context::new();
-        let err = workflow.execute(&mut ctx).await.unwrap_err();
-        assert!(matches!(err.error(), WorkflowError::StepError { .. }));
+        let err = workflow.run(&mut Context::new()).await.unwrap_err();
+        assert_eq!(err.step(), "failure");
+        assert!(matches!(err.kind(), ErrorKind::Step(Failure::Error(_))));
+        assert_eq!(
+            err.to_string(),
+            "step 'failure' failed: intentional failure"
+        );
         assert_eq!(err.report().steps()[0].status(), &StepStatus::Failed);
     }
 
     #[test]
-    fn test_builder_requires_start_step() {
-        let result = Workflow::builder().add_step("step", SuccessStep).build();
-        assert!(matches!(result, Err(WorkflowError::Configuration(_))));
+    fn test_empty_workflow_is_rejected() {
+        let result = Workflow::builder().build();
+        assert!(matches!(result, Err(BuildError::Empty)));
+    }
+
+    #[test]
+    fn test_start_defaults_to_first_step() {
+        let workflow = Workflow::builder()
+            .add_fn("first", done)
+            .add_fn("second", done)
+            .build()
+            .expect("valid workflow");
+        assert_eq!(workflow.start_step(), "first");
+    }
+
+    #[test]
+    fn test_unknown_start_step_is_rejected() {
+        let result = Workflow::builder()
+            .add_fn("a", done)
+            .start_with("missing")
+            .build();
+        assert!(matches!(result, Err(BuildError::UnknownStartStep(name)) if name == "missing"));
     }
 
     #[test]
@@ -646,19 +628,14 @@ mod tests {
         let result = Workflow::builder()
             .add_fn("a", done)
             .add_fn("a", done)
-            .start_with("a")
             .build();
-        assert!(matches!(result, Err(WorkflowError::DuplicateStep(name)) if name.as_str() == "a"));
+        assert!(matches!(result, Err(BuildError::DuplicateStep(name)) if name == "a"));
     }
 
     #[test]
-    fn test_then_before_any_step_is_rejected() {
-        let result = Workflow::builder()
-            .then(["a"])
-            .add_fn("a", done)
-            .start_with("a")
-            .build();
-        assert!(matches!(result, Err(WorkflowError::Configuration(_))));
+    fn test_modifier_before_any_step_is_rejected() {
+        let result = Workflow::builder().then(["a"]).add_fn("a", done).build();
+        assert_eq!(result.unwrap_err(), BuildError::ModifierWithoutStep("then"));
     }
 
     #[test]
@@ -667,22 +644,19 @@ mod tests {
             .add_fn("a", done)
             .then(["a"])
             .terminal()
-            .start_with("a")
             .build();
-        assert!(matches!(result, Err(WorkflowError::Configuration(_))));
+        assert!(matches!(result, Err(BuildError::TerminalWithTransitions(name)) if name == "a"));
     }
 
     #[test]
-    fn test_unknown_transition_target_is_rejected() {
+    fn test_unknown_transition_is_rejected() {
         let result = Workflow::builder()
             .add_fn("a", done)
             .then(["missing"])
-            .start_with("a")
             .build();
         assert!(matches!(
             result,
-            Err(WorkflowError::UnknownTransitionTarget { from, to })
-                if from.as_str() == "a" && to.as_str() == "missing"
+            Err(BuildError::UnknownTransition { from, to }) if from == "a" && to == "missing"
         ));
     }
 
@@ -695,12 +669,8 @@ mod tests {
             .terminal()
             .add_fn("orphan", done)
             .terminal()
-            .start_with("a")
             .build();
-        assert!(matches!(
-            result,
-            Err(WorkflowError::UnreachableStep(name)) if name.as_str() == "orphan"
-        ));
+        assert!(matches!(result, Err(BuildError::UnreachableStep(name)) if name == "orphan"));
     }
 
     #[test]
@@ -712,7 +682,6 @@ mod tests {
             .add_fn("b", done)
             .add_fn("orphan", done)
             .terminal()
-            .start_with("a")
             .build();
         assert!(result.is_ok());
     }
@@ -724,7 +693,6 @@ mod tests {
             .then(["poll", "finish"])
             .add_fn("finish", done)
             .terminal()
-            .start_with("poll")
             .build();
         assert!(result.is_ok());
     }

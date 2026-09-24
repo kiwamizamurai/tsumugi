@@ -2,34 +2,25 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tsumugi::prelude::*;
+use tsumugi::{ErrorKind, Failure};
 
-#[derive(Debug)]
 struct Step1;
 
 #[async_trait]
 impl Step for Step1 {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         ctx.insert("step1", "completed".to_string());
-        Ok(StepOutput::next("step2"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("Step1")
+        Ok(Next::step("step2"))
     }
 }
 
-#[derive(Debug)]
 struct Step2;
 
 #[async_trait]
 impl Step for Step2 {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         ctx.insert("step2", "completed".to_string());
-        Ok(StepOutput::done())
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("Step2")
+        Ok(Next::Done)
     }
 }
 
@@ -38,68 +29,61 @@ async fn test_complete_workflow() {
     let workflow = Workflow::builder()
         .add_step("step1", Step1)
         .add_step("step2", Step2)
-        .start_with("step1")
         .build()
         .expect("valid workflow");
 
     let mut ctx = Context::new();
-    let result = workflow.execute(&mut ctx).await;
+    workflow.run(&mut ctx).await.expect("workflow succeeds");
 
-    assert!(result.is_ok());
     assert_eq!(
-        ctx.get::<String>("step1").map(|s| s.as_str()),
+        ctx.get::<String>("step1").map(String::as_str),
         Some("completed")
     );
     assert_eq!(
-        ctx.get::<String>("step2").map(|s| s.as_str()),
+        ctx.get::<String>("step2").map(String::as_str),
         Some("completed")
     );
 }
 
-#[derive(Debug)]
-struct StepWithInvalidNext;
+#[tokio::test]
+async fn test_workflow_is_reusable() {
+    let workflow = Workflow::builder()
+        .add_step("step1", Step1)
+        .add_step("step2", Step2)
+        .build()
+        .expect("valid workflow");
 
-#[async_trait]
-impl Step for StepWithInvalidNext {
-    async fn execute(&self, _ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
-        Ok(StepOutput::next("nonexistent_step"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("StepWithInvalidNext")
+    for _ in 0..3 {
+        let mut ctx = Context::new();
+        workflow.run(&mut ctx).await.expect("workflow succeeds");
+        assert!(ctx.contains_key("step2"));
     }
 }
 
 #[tokio::test]
-async fn test_step_not_found_error() {
+async fn test_unknown_step_error() {
     let workflow = Workflow::builder()
-        .add_step("start", StepWithInvalidNext)
-        .start_with("start")
+        .add_fn("start", |_ctx| Ok(Next::step("nonexistent")))
         .build()
         .expect("valid workflow");
 
-    let mut ctx = Context::new();
-    let result = workflow.execute(&mut ctx).await;
+    let err = workflow.run(&mut Context::new()).await.unwrap_err();
 
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err.error(), WorkflowError::StepNotFound(name) if name.as_str() == "nonexistent_step")
+    assert_eq!(err.step(), "start");
+    assert!(matches!(err.kind(), ErrorKind::UnknownStep(name) if name == "nonexistent"));
+    assert_eq!(
+        err.to_string(),
+        "step 'start' continued to unknown step 'nonexistent'"
     );
 }
 
-#[derive(Debug)]
 struct SlowStep;
 
 #[async_trait]
 impl Step for SlowStep {
-    async fn execute(&self, _ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, _ctx: &mut Context) -> StepResult {
         tokio::time::sleep(Duration::from_secs(10)).await;
-        Ok(StepOutput::done())
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("SlowStep")
+        Ok(Next::Done)
     }
 }
 
@@ -107,131 +91,106 @@ impl Step for SlowStep {
 async fn test_timeout_error() {
     let workflow = Workflow::builder()
         .add_step("slow", SlowStep)
-        .timeout(Duration::from_millis(50))
-        .start_with("slow")
+        .timeout(Duration::from_millis(20))
         .build()
         .expect("valid workflow");
 
-    let mut ctx = Context::new();
-    let result = workflow.execute(&mut ctx).await;
+    let err = workflow.run(&mut Context::new()).await.unwrap_err();
 
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err.error(), WorkflowError::Timeout { step_name } if step_name.as_str() == "slow")
-    );
+    assert_eq!(err.step(), "slow");
+    assert!(err.is_timeout());
+    assert!(matches!(
+        err.kind(),
+        ErrorKind::Step(Failure::Timeout(after)) if *after == Duration::from_millis(20)
+    ));
+    assert_eq!(err.to_string(), "step 'slow' timed out after 20ms");
 }
 
-struct RetryableStep {
+struct FlakyStep {
     attempts: Arc<AtomicU32>,
     fail_until: u32,
 }
 
-impl std::fmt::Debug for RetryableStep {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RetryableStep").finish()
-    }
-}
-
 #[async_trait]
-impl Step for RetryableStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+impl Step for FlakyStep {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
         if attempt < self.fail_until {
-            Err(WorkflowError::StepError {
-                step_name: self.name(),
-                details: format!("Attempt {} failed", attempt + 1),
-            })
-        } else {
-            ctx.insert("success", true);
-            Ok(StepOutput::done())
+            return Err(format!("attempt {} failed", attempt + 1).into());
         }
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("RetryableStep")
+        ctx.insert("success", true);
+        Ok(Next::Done)
     }
 
     fn retry_policy(&self) -> RetryPolicy {
-        RetryPolicy::fixed(3, Duration::from_millis(10))
+        RetryPolicy::fixed(3, Duration::from_millis(1))
     }
 }
 
 #[tokio::test]
 async fn test_retry_eventual_success() {
     let attempts = Arc::new(AtomicU32::new(0));
-    let step = RetryableStep {
-        attempts: attempts.clone(),
+    let step = FlakyStep {
+        attempts: Arc::clone(&attempts),
         fail_until: 2,
     };
 
     let workflow = Workflow::builder()
-        .add_step("retry", step)
-        .start_with("retry")
+        .add_step("flaky", step)
         .build()
         .expect("valid workflow");
 
     let mut ctx = Context::new();
-    let result = workflow.execute(&mut ctx).await;
+    let report = workflow.run(&mut ctx).await.expect("workflow succeeds");
 
-    assert!(result.is_ok());
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(report.total_retries(), 2);
     assert_eq!(ctx.get::<bool>("success"), Some(&true));
 }
 
 #[tokio::test]
 async fn test_retry_exhausted() {
     let attempts = Arc::new(AtomicU32::new(0));
-    let step = RetryableStep {
-        attempts: attempts.clone(),
-        fail_until: 10,
+    let step = FlakyStep {
+        attempts: Arc::clone(&attempts),
+        fail_until: u32::MAX,
     };
 
     let workflow = Workflow::builder()
-        .add_step("retry", step)
-        .start_with("retry")
+        .add_step("flaky", step)
         .build()
         .expect("valid workflow");
 
-    let mut ctx = Context::new();
-    let result = workflow.execute(&mut ctx).await;
+    let err = workflow.run(&mut Context::new()).await.unwrap_err();
 
-    assert!(result.is_err());
     assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    assert_eq!(err.to_string(), "step 'flaky' failed: attempt 4 failed");
 }
 
 #[tokio::test]
-async fn test_heterogeneous_context() {
-    #[derive(Debug)]
-    struct MultiTypeStep;
+async fn test_workflow_can_be_spawned() {
+    let workflow = Arc::new(
+        Workflow::builder()
+            .add_async_fn("work", |ctx| {
+                Box::pin(async move {
+                    tokio::task::yield_now().await;
+                    ctx.insert("done", true);
+                    Ok(Next::Done)
+                })
+            })
+            .build()
+            .expect("valid workflow"),
+    );
 
-    #[async_trait]
-    impl Step for MultiTypeStep {
-        async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
-            ctx.insert("int_val", 42i32);
-            ctx.insert("str_val", "hello".to_string());
-            ctx.insert("bool_val", true);
-            Ok(StepOutput::done())
-        }
+    // Workflows must be usable from spawned tasks, e.g. in web handlers.
+    let handle = tokio::spawn(async move {
+        let mut ctx = Context::new();
+        workflow.run(&mut ctx).await.map(|_| ctx)
+    });
 
-        fn name(&self) -> StepName {
-            StepName::new("MultiTypeStep")
-        }
-    }
-
-    let workflow = Workflow::builder()
-        .add_step("multi", MultiTypeStep)
-        .start_with("multi")
-        .build()
-        .expect("valid workflow");
-
-    let mut ctx = Context::new();
-    workflow.execute(&mut ctx).await.expect("workflow failed");
-
-    assert_eq!(ctx.get::<i32>("int_val"), Some(&42));
-    assert_eq!(ctx.get::<String>("str_val"), Some(&"hello".to_string()));
-    assert_eq!(ctx.get::<bool>("bool_val"), Some(&true));
-
-    // Wrong type returns None
-    assert_eq!(ctx.get::<String>("int_val"), None);
+    let ctx = handle
+        .await
+        .expect("task panicked")
+        .expect("workflow failed");
+    assert_eq!(ctx.get::<bool>("done"), Some(&true));
 }

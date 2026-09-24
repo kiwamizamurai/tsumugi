@@ -66,35 +66,20 @@ struct OrderValidationStep;
 
 #[async_trait]
 impl Step for OrderValidationStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Validating order...");
 
-        let order = ctx
-            .get::<Order>("order")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Order data not found".to_string(),
-            })?;
+        let order = ctx.require::<Order>("order")?;
 
         if order.items.is_empty() {
-            return Err(WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Order must contain at least one item".to_string(),
-            });
+            return Err("Order must contain at least one item".into());
         }
 
         if order.total_amount <= 0.0 {
-            return Err(WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Invalid order amount".to_string(),
-            });
+            return Err("Invalid order amount".into());
         }
 
-        Ok(StepOutput::next("inventory_check"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("OrderValidation")
+        Ok(Next::step("inventory_check"))
     }
 }
 
@@ -104,42 +89,24 @@ struct InventoryCheckStep;
 
 #[async_trait]
 impl Step for InventoryCheckStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Checking inventory...");
 
-        let order = ctx
-            .get::<Order>("order")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Order data not found".to_string(),
-            })?;
+        let order = ctx.require::<Order>("order")?;
 
-        let inventory = ctx
-            .get::<HashMap<String, u32>>("inventory")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Inventory data not found".to_string(),
-            })?;
+        let inventory = ctx.require::<HashMap<String, u32>>("inventory")?;
 
         for item in &order.items {
-            let available =
-                inventory
-                    .get(&item.product_id)
-                    .ok_or_else(|| WorkflowError::StepError {
-                        step_name: self.name(),
-                        details: format!("Product not found: {}", item.product_id),
-                    })?;
+            let available = inventory
+                .get(&item.product_id)
+                .ok_or_else(|| format!("Product not found: {}", item.product_id))?;
 
             if available < &item.quantity {
-                return Ok(StepOutput::next("pending_notification"));
+                return Ok(Next::step("pending_notification"));
             }
         }
 
-        Ok(StepOutput::next("payment_processing"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("InventoryCheck")
+        Ok(Next::step("payment_processing"))
     }
 }
 
@@ -149,15 +116,10 @@ struct PaymentProcessingStep;
 
 #[async_trait]
 impl Step for PaymentProcessingStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Processing payment...");
 
-        let order = ctx
-            .get::<Order>("order")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Order data not found".to_string(),
-            })?;
+        let order = ctx.require::<Order>("order")?;
 
         let (payment_status, next_step) = match &order.payment_method {
             PaymentMethod::CreditCard { .. } => (
@@ -177,11 +139,7 @@ impl Step for PaymentProcessingStep {
         };
 
         ctx.insert("payment_status", payment_status);
-        Ok(StepOutput::next(next_step))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("PaymentProcessing")
+        Ok(Next::step(next_step))
     }
 }
 
@@ -191,15 +149,10 @@ struct ShippingArrangementStep;
 
 #[async_trait]
 impl Step for ShippingArrangementStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Arranging shipping...");
 
-        let order = ctx
-            .get::<Order>("order")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Order data not found".to_string(),
-            })?;
+        let order = ctx.require::<Order>("order")?;
 
         let shipping_info = ShippingInfo {
             tracking_number: format!("TRACK-{}", order.id),
@@ -207,11 +160,7 @@ impl Step for ShippingArrangementStep {
         };
 
         ctx.insert("shipping_info", shipping_info);
-        Ok(StepOutput::next("success_notification"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("ShippingArrangement")
+        Ok(Next::step("success_notification"))
     }
 }
 
@@ -221,33 +170,19 @@ struct SuccessNotificationStep;
 
 #[async_trait]
 impl Step for SuccessNotificationStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Sending success notification...");
 
-        let order = ctx
-            .get::<Order>("order")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Order data not found".to_string(),
-            })?;
+        let order = ctx.require::<Order>("order")?;
 
-        let shipping_info =
-            ctx.get::<ShippingInfo>("shipping_info")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "Shipping info not found".to_string(),
-                })?;
+        let shipping_info = ctx.require::<ShippingInfo>("shipping_info")?;
 
         println!(
             "Order successful! Order ID: {}, Tracking: {}, ETA: {}",
             order.id, shipping_info.tracking_number, shipping_info.estimated_delivery
         );
 
-        Ok(StepOutput::done())
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("SuccessNotification")
+        Ok(Next::Done)
     }
 }
 
@@ -257,26 +192,17 @@ struct PendingNotificationStep;
 
 #[async_trait]
 impl Step for PendingNotificationStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Sending pending notification...");
 
-        let order = ctx
-            .get::<Order>("order")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Order data not found".to_string(),
-            })?;
+        let order = ctx.require::<Order>("order")?;
 
         println!(
             "Payment pending for Order ID: {}. Please complete the transfer.",
             order.id
         );
 
-        Ok(StepOutput::done())
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("PendingNotification")
+        Ok(Next::Done)
     }
 }
 
@@ -335,7 +261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.insert("order", order);
     ctx.insert("inventory", inventory);
 
-    match workflow.execute(&mut ctx).await {
+    match workflow.run(&mut ctx).await {
         Ok(_) => println!("\nWorkflow completed successfully"),
         Err(err) => {
             eprintln!("Workflow failed: {}", err);

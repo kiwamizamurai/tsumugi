@@ -3,7 +3,7 @@
 use crate::workflow::Workflow;
 use std::fmt::Write;
 
-impl Workflow {
+impl<S: Send> Workflow<S> {
     /// Renders the workflow as a [Mermaid](https://mermaid.js.org) flowchart.
     ///
     /// Declared transitions are drawn as edges, and steps declared with
@@ -20,11 +20,10 @@ impl Workflow {
     /// use tsumugi::prelude::*;
     ///
     /// let workflow = Workflow::builder()
-    ///     .add_fn("validate", |_ctx| Ok(StepOutput::next("save")))
+    ///     .add_fn("validate", |_ctx| Ok(Next::step("save")))
     ///     .then(["save"])
-    ///     .add_fn("save", |_ctx| Ok(StepOutput::done()))
+    ///     .add_fn("save", |_ctx| Ok(Next::Done))
     ///     .terminal()
-    ///     .start_with("validate")
     ///     .build()
     ///     .expect("valid workflow");
     ///
@@ -104,7 +103,7 @@ fn escape(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tsumugi_core::StepOutput;
+    use tsumugi_core::Next;
 
     #[test]
     fn test_escape() {
@@ -114,10 +113,9 @@ mod tests {
     #[test]
     fn test_dynamic_steps_are_dashed() {
         let workflow = Workflow::builder()
-            .add_fn("a", |_ctx| Ok(StepOutput::next("b")))
+            .add_fn("a", |_ctx| Ok(Next::step("b")))
             .then(["b"])
-            .add_fn("b", |_ctx| Ok(StepOutput::done()))
-            .start_with("a")
+            .add_fn("b", |_ctx| Ok(Next::Done))
             .build()
             .expect("valid workflow");
 

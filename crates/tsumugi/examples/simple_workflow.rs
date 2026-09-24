@@ -7,14 +7,10 @@ struct DataLoadStep;
 
 #[async_trait]
 impl Step for DataLoadStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Loading data...");
         ctx.insert("data", "sample data".to_string());
-        Ok(StepOutput::done())
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("DataLoadStep")
+        Ok(Next::Done)
     }
 }
 
@@ -29,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut ctx = Context::new();
 
-    match workflow.execute(&mut ctx).await {
+    match workflow.run(&mut ctx).await {
         Ok(_) => {
             println!("Workflow completed successfully");
             if let Some(data) = ctx.get::<String>("data") {

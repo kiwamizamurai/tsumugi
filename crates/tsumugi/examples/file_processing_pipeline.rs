@@ -64,7 +64,7 @@ struct ScanDirectoryStep;
 
 #[async_trait]
 impl Step for ScanDirectoryStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Scanning input directory...");
 
         // In production, use std::fs::read_dir
@@ -104,11 +104,7 @@ impl Step for ScanDirectoryStep {
 
         ctx.insert("input_files", json_files);
 
-        Ok(StepOutput::next("parse"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("ScanDirectory")
+        Ok(Next::step("parse"))
     }
 }
 
@@ -118,16 +114,10 @@ struct ParseFilesStep;
 
 #[async_trait]
 impl Step for ParseFilesStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Parsing files...");
 
-        let files = ctx
-            .get::<Vec<InputFile>>("input_files")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Input files not found".to_string(),
-            })?
-            .clone();
+        let files = ctx.require::<Vec<InputFile>>("input_files")?.clone();
 
         let mut all_entries: Vec<LogEntry> = Vec::new();
         let mut stats = ProcessingStats::default();
@@ -159,11 +149,7 @@ impl Step for ParseFilesStep {
         ctx.insert("log_entries", all_entries);
         ctx.insert("stats", stats);
 
-        Ok(StepOutput::next("filter"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("ParseFiles")
+        Ok(Next::step("filter"))
     }
 }
 
@@ -204,16 +190,10 @@ struct FilterEntriesStep;
 
 #[async_trait]
 impl Step for FilterEntriesStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Filtering entries...");
 
-        let entries = ctx
-            .get::<Vec<LogEntry>>("log_entries")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Log entries not found".to_string(),
-            })?
-            .clone();
+        let entries = ctx.require::<Vec<LogEntry>>("log_entries")?.clone();
 
         // Filter configuration (could come from context)
         let min_level = ctx
@@ -234,11 +214,7 @@ impl Step for FilterEntriesStep {
 
         ctx.insert("filtered_entries", filtered);
 
-        Ok(StepOutput::next("write_output"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("FilterEntries")
+        Ok(Next::step("write_output"))
     }
 }
 
@@ -248,24 +224,12 @@ struct WriteOutputStep;
 
 #[async_trait]
 impl Step for WriteOutputStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Writing output...");
 
-        let entries = ctx
-            .get::<Vec<LogEntry>>("filtered_entries")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Filtered entries not found".to_string(),
-            })?
-            .clone();
+        let entries = ctx.require::<Vec<LogEntry>>("filtered_entries")?.clone();
 
-        let stats = ctx
-            .get::<ProcessingStats>("stats")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Stats not found".to_string(),
-            })?
-            .clone();
+        let stats = ctx.require::<ProcessingStats>("stats")?.clone();
 
         let output_file = "./output/aggregated_logs.csv".to_string();
 
@@ -285,11 +249,7 @@ impl Step for WriteOutputStep {
 
         ctx.insert("report", report);
 
-        Ok(StepOutput::next("summary"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("WriteOutput")
+        Ok(Next::step("summary"))
     }
 }
 
@@ -299,13 +259,8 @@ struct SummaryStep;
 
 #[async_trait]
 impl Step for SummaryStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
-        let report =
-            ctx.get::<ProcessingReport>("report")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "Report not found".to_string(),
-                })?;
+    async fn run(&self, ctx: &mut Context) -> StepResult {
+        let report = ctx.require::<ProcessingReport>("report")?;
 
         println!("\n┌─────────────────────────────────────────┐");
         println!("│     FILE PROCESSING SUMMARY             │");
@@ -338,11 +293,7 @@ impl Step for SummaryStep {
             println!("{},{},{}", entry.timestamp, entry.level, entry.message);
         }
 
-        Ok(StepOutput::done())
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("Summary")
+        Ok(Next::Done)
     }
 }
 
@@ -365,7 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== File Processing Pipeline ===\n");
 
-    match workflow.execute(&mut ctx).await {
+    match workflow.run(&mut ctx).await {
         Ok(_) => {
             println!("\nPipeline completed successfully!");
         }

@@ -89,7 +89,7 @@ struct LoadDataStep;
 
 #[async_trait]
 impl Step for LoadDataStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Loading import data...");
 
         // In production, load from file or API
@@ -154,11 +154,7 @@ impl Step for LoadDataStep {
         ctx.insert("import_data", data);
         ctx.insert("validation_result", ValidationResult::default());
 
-        Ok(StepOutput::next("schema_validation"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("LoadData")
+        Ok(Next::step("schema_validation"))
     }
 }
 
@@ -168,15 +164,10 @@ struct SchemaValidationStep;
 
 #[async_trait]
 impl Step for SchemaValidationStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Running schema validation...");
 
-        let data =
-            ctx.get::<ImportData>("import_data")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "Import data not found".to_string(),
-                })?;
+        let data = ctx.require::<ImportData>("import_data")?;
 
         let mut result = ValidationResult::default();
 
@@ -229,11 +220,7 @@ impl Step for SchemaValidationStep {
         existing.merge(result);
         ctx.insert("validation_result", existing);
 
-        Ok(StepOutput::next("business_validation"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("SchemaValidation")
+        Ok(Next::step("business_validation"))
     }
 }
 
@@ -243,15 +230,10 @@ struct BusinessValidationStep;
 
 #[async_trait]
 impl Step for BusinessValidationStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Running business rule validation...");
 
-        let data =
-            ctx.get::<ImportData>("import_data")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "Import data not found".to_string(),
-                })?;
+        let data = ctx.require::<ImportData>("import_data")?;
 
         let mut result = ValidationResult::default();
 
@@ -304,11 +286,7 @@ impl Step for BusinessValidationStep {
         existing.merge(result);
         ctx.insert("validation_result", existing);
 
-        Ok(StepOutput::next("reference_validation"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("BusinessValidation")
+        Ok(Next::step("reference_validation"))
     }
 }
 
@@ -318,15 +296,10 @@ struct ReferenceValidationStep;
 
 #[async_trait]
 impl Step for ReferenceValidationStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Running reference validation...");
 
-        let data =
-            ctx.get::<ImportData>("import_data")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "Import data not found".to_string(),
-                })?;
+        let data = ctx.require::<ImportData>("import_data")?;
 
         let mut result = ValidationResult::default();
 
@@ -369,11 +342,7 @@ impl Step for ReferenceValidationStep {
         existing.merge(result);
         ctx.insert("validation_result", existing);
 
-        Ok(StepOutput::next("report"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("ReferenceValidation")
+        Ok(Next::step("report"))
     }
 }
 
@@ -383,7 +352,7 @@ struct ReportStep;
 
 #[async_trait]
 impl Step for ReportStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         let mut result = ctx
             .get::<ValidationResult>("validation_result")
             .cloned()
@@ -429,11 +398,7 @@ impl Step for ReportStep {
 
         ctx.insert("validation_result", result);
 
-        Ok(StepOutput::done())
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("Report")
+        Ok(Next::Done)
     }
 }
 
@@ -454,7 +419,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== Data Validation Pipeline ===\n");
 
-    match workflow.execute(&mut ctx).await {
+    match workflow.run(&mut ctx).await {
         Ok(_) => {
             let result = ctx.get::<ValidationResult>("validation_result");
             if let Some(r) = result {

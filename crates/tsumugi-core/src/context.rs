@@ -1,59 +1,10 @@
-//! Workflow execution context with heterogeneous type storage.
+//! A general-purpose, heterogeneous workflow state.
 
-use std::any::Any;
+use std::any::{type_name, Any};
 use std::collections::HashMap;
+use std::error::Error;
 use std::fmt;
 use std::marker::PhantomData;
-use std::time::Instant;
-
-/// String key under which a value is stored in a [`Context`].
-///
-/// A `ContextKey` does not constrain the value type. Use [`Key`] for keys
-/// that are checked against the value type at compile time.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ContextKey(String);
-
-impl ContextKey {
-    /// Creates a new ContextKey.
-    pub fn new(key: impl Into<String>) -> Self {
-        Self(key.into())
-    }
-
-    /// Returns the key as a string slice.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ContextKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<&str> for ContextKey {
-    fn from(s: &str) -> Self {
-        Self::new(s)
-    }
-}
-
-impl From<String> for ContextKey {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl AsRef<str> for ContextKey {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::borrow::Borrow<str> for ContextKey {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
 
 /// A context key bound to the type of the value it stores.
 ///
@@ -121,7 +72,7 @@ impl<T> fmt::Debug for Key<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Key")
             .field(&self.name)
-            .field(&std::any::type_name::<T>())
+            .field(&type_name::<T>())
             .finish()
     }
 }
@@ -132,16 +83,10 @@ impl<T> AsRef<str> for Key<T> {
     }
 }
 
-impl<T> From<Key<T>> for ContextKey {
-    fn from(key: Key<T>) -> Self {
-        Self::new(key.name)
-    }
-}
-
 /// Types that can address a value of type `T` in a [`Context`].
 ///
-/// Plain string keys (`&str`, `String`, [`ContextKey`]) work with any value
-/// type, while a typed [`Key<T>`] only works with `T`.
+/// Plain string keys work with any value type, while a typed [`Key<T>`] only
+/// works with `T`.
 pub trait KeyFor<T> {
     /// Returns the key name.
     fn key_name(&self) -> &str;
@@ -171,69 +116,85 @@ impl<T> KeyFor<T> for &String {
     }
 }
 
-impl<T> KeyFor<T> for ContextKey {
-    fn key_name(&self) -> &str {
-        &self.0
+/// Error returned by [`Context::require`] when a value is missing or has a
+/// different type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingValue {
+    key: String,
+    type_name: &'static str,
+}
+
+impl MissingValue {
+    /// Returns the key that was looked up.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Returns the name of the expected value type.
+    pub fn type_name(&self) -> &'static str {
+        self.type_name
     }
 }
 
-impl<T> KeyFor<T> for &ContextKey {
-    fn key_name(&self) -> &str {
-        &self.0
+impl fmt::Display for MissingValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "context has no value of type `{}` for key `{}`",
+            self.type_name, self.key
+        )
     }
 }
 
-/// Execution context for workflow steps with heterogeneous type storage.
+impl Error for MissingValue {}
+
+/// A general-purpose workflow state that stores values of any type by key.
 ///
-/// Stores any `Send + Sync` type, retrieved by downcasting.
+/// `Context` is the default state of a workflow. It is convenient when steps
+/// are loosely coupled or defined in different crates. When all steps are
+/// known up front, a dedicated state struct gives stronger compile-time
+/// guarantees; see [`Step`](crate::Step).
 ///
 /// # Examples
 ///
 /// ```
-/// use tsumugi_core::Context;
+/// use tsumugi_core::{Context, Key};
+///
+/// const NAME: Key<String> = Key::new("name");
 ///
 /// let mut ctx = Context::new();
 ///
-/// // Store different types
+/// // Store values of different types
+/// ctx.insert(NAME, "Alice".to_string());
 /// ctx.insert("user_id", 123u64);
-/// ctx.insert("name", "Alice".to_string());
-/// ctx.insert("active", true);
 ///
-/// // Retrieve with type annotation
+/// // Typed keys infer the value type; string keys need an annotation
+/// assert_eq!(ctx.get(NAME).map(String::as_str), Some("Alice"));
 /// assert_eq!(ctx.get::<u64>("user_id"), Some(&123));
-/// assert_eq!(ctx.get::<String>("name"), Some(&"Alice".to_string()));
-/// assert_eq!(ctx.get::<bool>("active"), Some(&true));
 ///
-/// // Wrong type returns None
+/// // A wrong type behaves like a missing value
 /// assert_eq!(ctx.get::<String>("user_id"), None);
+///
+/// // `require` turns a missing value into an error, for use with `?` in steps
+/// assert!(ctx.require::<u32>("age").is_err());
 /// ```
+#[derive(Default)]
 pub struct Context {
-    data: HashMap<ContextKey, Box<dyn Any + Send + Sync>>,
-    started_at: Instant,
+    data: HashMap<String, Box<dyn Any + Send + Sync>>,
 }
 
 impl fmt::Debug for Context {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Context")
             .field("keys", &self.data.keys().collect::<Vec<_>>())
-            .field("started_at", &self.started_at)
             .finish()
-    }
-}
-
-impl Default for Context {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 impl Context {
     /// Creates a new empty context.
     pub fn new() -> Self {
-        Self {
-            data: HashMap::new(),
-            started_at: Instant::now(),
-        }
+        Self::default()
     }
 
     /// Inserts a value with the given key.
@@ -241,7 +202,7 @@ impl Context {
     /// If the key already exists, the previous value is replaced.
     pub fn insert<T: Any + Send + Sync>(&mut self, key: impl KeyFor<T>, value: T) {
         self.data
-            .insert(ContextKey::new(key.key_name()), Box::new(value));
+            .insert(key.key_name().to_string(), Box::new(value));
     }
 
     /// Returns a reference to the value for the given key.
@@ -260,6 +221,36 @@ impl Context {
         self.data
             .get_mut(key.key_name())
             .and_then(|v| v.downcast_mut::<T>())
+    }
+
+    /// Returns a reference to the value for the given key, or a
+    /// [`MissingValue`] error if the key doesn't exist or the type doesn't
+    /// match.
+    ///
+    /// The error converts into [`StepError`](crate::StepError), so steps can
+    /// use `?`:
+    ///
+    /// ```
+    /// use tsumugi_core::{Context, Key, Next, StepResult};
+    ///
+    /// const TOTAL: Key<u64> = Key::new("total");
+    ///
+    /// fn check(ctx: &mut Context) -> StepResult {
+    ///     let total = *ctx.require(TOTAL)?;
+    ///     Ok(if total > 0 { Next::step("charge") } else { Next::Done })
+    /// }
+    ///
+    /// assert!(check(&mut Context::new()).is_err());
+    /// ```
+    pub fn require<T: Any>(&self, key: impl KeyFor<T>) -> Result<&T, MissingValue> {
+        let name = key.key_name();
+        self.data
+            .get(name)
+            .and_then(|v| v.downcast_ref::<T>())
+            .ok_or_else(|| MissingValue {
+                key: name.to_string(),
+                type_name: type_name::<T>(),
+            })
     }
 
     /// Removes a value by key and returns it.
@@ -283,8 +274,8 @@ impl Context {
     }
 
     /// Returns an iterator over all keys in the context.
-    pub fn keys(&self) -> impl Iterator<Item = &ContextKey> {
-        self.data.keys()
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.data.keys().map(String::as_str)
     }
 
     /// Returns the number of entries in the context.
@@ -300,11 +291,6 @@ impl Context {
     /// Removes all entries from the context.
     pub fn clear(&mut self) {
         self.data.clear();
-    }
-
-    /// Returns the time elapsed since the context was created.
-    pub fn elapsed(&self) -> std::time::Duration {
-        self.started_at.elapsed()
     }
 }
 
@@ -378,9 +364,19 @@ mod tests {
     }
 
     #[test]
-    fn test_context_key() {
-        let key1 = ContextKey::new("test");
-        let key2: ContextKey = "test".into();
-        assert_eq!(key1, key2);
+    fn test_require() {
+        const COUNT: Key<u32> = Key::new("count");
+        let mut ctx = Context::new();
+
+        let missing = ctx.require(COUNT).unwrap_err();
+        assert_eq!(missing.key(), "count");
+        assert_eq!(missing.type_name(), "u32");
+        assert_eq!(
+            missing.to_string(),
+            "context has no value of type `u32` for key `count`"
+        );
+
+        ctx.insert(COUNT, 3);
+        assert_eq!(ctx.require(COUNT), Ok(&3));
     }
 }
