@@ -5,6 +5,11 @@
 [![CI](https://github.com/kiwamizamurai/tsumugi/actions/workflows/ci.yml/badge.svg)](https://github.com/kiwamizamurai/tsumugi/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/tsumugi.svg)](LICENSE)
 
+> [!CAUTION]
+> tsumugi is still in beta and has not yet been published to crates.io. APIs may change before
+> the first crates.io release. In the meantime, you can depend on it directly via the git tag —
+> see [Installation](#installation).
+
 A lightweight, type-safe workflow engine you embed in your Rust application. The name "Tsumugi" (紡) means "to spin" or "to weave" in Japanese.
 
 ## Why tsumugi?
@@ -40,6 +45,14 @@ tsumugi is different. It's a **library** you embed directly in your Rust applica
 ```toml
 [dependencies]
 tsumugi = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+Or, until this crate is published to crates.io, depend on the git tag directly:
+
+```toml
+[dependencies]
+tsumugi = { git = "https://github.com/kiwamizamurai/tsumugi.git", tag = "v0.1.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -339,9 +352,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+Licensed under the [MIT license](LICENSE).
