@@ -67,7 +67,7 @@ struct FetchApiDataStep;
 
 #[async_trait]
 impl Step for FetchApiDataStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Fetching data from REST API...");
 
         // In production, use reqwest or similar:
@@ -114,11 +114,7 @@ impl Step for FetchApiDataStep {
         println!("  Fetched {} users", response.users.len());
         ctx.insert("api_response", response);
 
-        Ok(StepOutput::next("transform"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("FetchApiData")
+        Ok(Next::step("transform"))
     }
 }
 
@@ -128,15 +124,10 @@ struct TransformDataStep;
 
 #[async_trait]
 impl Step for TransformDataStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Transforming data...");
 
-        let response =
-            ctx.get::<ApiResponse>("api_response")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "API response not found".to_string(),
-                })?;
+        let response = ctx.require::<ApiResponse>("api_response")?;
 
         // Transform: filter active users and map to CSV records
         let records: Vec<CsvRecord> = response
@@ -161,11 +152,7 @@ impl Step for TransformDataStep {
         ctx.insert("department_stats", dept_counts);
         ctx.insert("csv_records", records);
 
-        Ok(StepOutput::next("generate_csv"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("TransformData")
+        Ok(Next::step("generate_csv"))
     }
 }
 
@@ -175,16 +162,10 @@ struct GenerateCsvStep;
 
 #[async_trait]
 impl Step for GenerateCsvStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Generating CSV...");
 
-        let records = ctx
-            .get::<Vec<CsvRecord>>("csv_records")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "CSV records not found".to_string(),
-            })?
-            .clone();
+        let records = ctx.require::<Vec<CsvRecord>>("csv_records")?.clone();
 
         let output = CsvOutput {
             headers: vec![
@@ -209,11 +190,7 @@ impl Step for GenerateCsvStep {
         println!("  Generated: {}", output.filename);
         ctx.insert("csv_output", output);
 
-        Ok(StepOutput::next("summary"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("GenerateCsv")
+        Ok(Next::step("summary"))
     }
 }
 
@@ -223,22 +200,12 @@ struct SummaryStep;
 
 #[async_trait]
 impl Step for SummaryStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Generating summary...");
 
-        let output =
-            ctx.get::<CsvOutput>("csv_output")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "CSV output not found".to_string(),
-                })?;
+        let output = ctx.require::<CsvOutput>("csv_output")?;
 
-        let stats = ctx
-            .get::<HashMap<String, usize>>("department_stats")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Department stats not found".to_string(),
-            })?;
+        let stats = ctx.require::<HashMap<String, usize>>("department_stats")?;
 
         println!("\n=== ETL Summary ===");
         println!("Output file: {}", output.filename);
@@ -261,11 +228,7 @@ impl Step for SummaryStep {
             println!("... and {} more rows", output.records.len() - 3);
         }
 
-        Ok(StepOutput::done())
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("Summary")
+        Ok(Next::Done)
     }
 }
 
@@ -290,7 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== ETL Pipeline: REST API to CSV ===\n");
 
-    match workflow.execute(&mut ctx).await {
+    match workflow.run(&mut ctx).await {
         Ok(_) => {
             println!("\nETL pipeline completed successfully!");
         }

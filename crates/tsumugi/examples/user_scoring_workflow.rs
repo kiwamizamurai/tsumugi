@@ -29,7 +29,7 @@ struct UserDataLoadStep;
 
 #[async_trait]
 impl Step for UserDataLoadStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Loading user data...");
 
         let user = UserData {
@@ -39,11 +39,7 @@ impl Step for UserDataLoadStep {
         };
         ctx.insert("user_data", user);
 
-        Ok(StepOutput::next("load_scores"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("UserDataLoad")
+        Ok(Next::step("load_scores"))
     }
 }
 
@@ -53,17 +49,13 @@ struct ScoresLoadStep;
 
 #[async_trait]
 impl Step for ScoresLoadStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Loading scores...");
 
         let scores: HashMap<u64, f64> = HashMap::from([(1, 85.5), (2, 92.0), (3, 78.3)]);
         ctx.insert("scores", scores);
 
-        Ok(StepOutput::next("validate"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("ScoresLoad")
+        Ok(Next::step("validate"))
     }
 }
 
@@ -73,42 +65,22 @@ struct DataValidationStep;
 
 #[async_trait]
 impl Step for DataValidationStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Validating data...");
 
-        let user = ctx
-            .get::<UserData>("user_data")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "User data not found".to_string(),
-            })?;
+        let user = ctx.require::<UserData>("user_data")?;
 
         if user.age < 18 {
-            return Err(WorkflowError::StepError {
-                step_name: self.name(),
-                details: "User must be 18 or older".to_string(),
-            });
+            return Err("User must be 18 or older".into());
         }
 
-        let scores =
-            ctx.get::<HashMap<u64, f64>>("scores")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "Scores not found".to_string(),
-                })?;
+        let scores = ctx.require::<HashMap<u64, f64>>("scores")?;
 
         if !scores.contains_key(&user.id) {
-            return Err(WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Score not found for user".to_string(),
-            });
+            return Err("Score not found for user".into());
         }
 
-        Ok(StepOutput::next("process"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("DataValidation")
+        Ok(Next::step("process"))
     }
 }
 
@@ -118,30 +90,16 @@ struct DataProcessingStep;
 
 #[async_trait]
 impl Step for DataProcessingStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Processing data...");
 
-        let user = ctx
-            .get::<UserData>("user_data")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "User data not found".to_string(),
-            })?
-            .clone();
+        let user = ctx.require::<UserData>("user_data")?.clone();
 
-        let scores =
-            ctx.get::<HashMap<u64, f64>>("scores")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "Scores not found".to_string(),
-                })?;
+        let scores = ctx.require::<HashMap<u64, f64>>("scores")?;
 
         let score = scores
             .get(&user.id)
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Score not found for user".to_string(),
-            })?;
+            .ok_or_else(|| "Score not found for user".to_string())?;
 
         let category = match *score {
             s if s >= 90.0 => "A",
@@ -157,11 +115,7 @@ impl Step for DataProcessingStep {
         };
 
         ctx.insert("processed_data", processed);
-        Ok(StepOutput::next("notify"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("DataProcessing")
+        Ok(Next::step("notify"))
     }
 }
 
@@ -171,13 +125,8 @@ struct NotificationStep;
 
 #[async_trait]
 impl Step for NotificationStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
-        let processed =
-            ctx.get::<ProcessedData>("processed_data")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "Processed data not found".to_string(),
-                })?;
+    async fn run(&self, ctx: &mut Context) -> StepResult {
+        let processed = ctx.require::<ProcessedData>("processed_data")?;
 
         if processed.score < 80.0 {
             println!(
@@ -186,11 +135,7 @@ impl Step for NotificationStep {
             );
         }
 
-        Ok(StepOutput::done())
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("Notification")
+        Ok(Next::Done)
     }
 }
 
@@ -209,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut ctx = Context::new();
 
-    match workflow.execute(&mut ctx).await {
+    match workflow.run(&mut ctx).await {
         Ok(_) => {
             if let Some(processed) = ctx.get::<ProcessedData>("processed_data") {
                 println!("\nWorkflow completed successfully");

@@ -54,7 +54,7 @@ struct LoadConfigStep;
 
 #[async_trait]
 impl Step for LoadConfigStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Loading service configurations...");
 
         // In production, load from config file or environment
@@ -84,11 +84,7 @@ impl Step for LoadConfigStep {
         println!("  Loaded {} service configurations", services.len());
         ctx.insert("service_configs", services);
 
-        Ok(StepOutput::next("check_services"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("LoadConfig")
+        Ok(Next::step("check_services"))
     }
 }
 
@@ -98,15 +94,11 @@ struct CheckServicesStep;
 
 #[async_trait]
 impl Step for CheckServicesStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Checking service health...");
 
         let configs = ctx
-            .get::<Vec<ServiceConfig>>("service_configs")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Service configs not found".to_string(),
-            })?
+            .require::<Vec<ServiceConfig>>("service_configs")?
             .clone();
 
         let mut results: Vec<ServiceHealth> = Vec::new();
@@ -139,17 +131,12 @@ impl Step for CheckServicesStep {
 
         ctx.insert("health_results", results);
 
-        Ok(StepOutput::next("aggregate"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("CheckServices")
+        Ok(Next::step("aggregate"))
     }
 
     fn retry_policy(&self) -> RetryPolicy {
         // 3 retries, starting at 500ms, max 5s, multiplier 2
-        RetryPolicy::exponential_backoff(3, Duration::from_millis(500), Duration::from_secs(5), 2)
-            .unwrap_or(RetryPolicy::None)
+        RetryPolicy::exponential(3, Duration::from_millis(500)).max_delay(Duration::from_secs(5))
     }
 
     fn timeout(&self) -> Option<Duration> {
@@ -183,16 +170,10 @@ struct AggregateResultsStep;
 
 #[async_trait]
 impl Step for AggregateResultsStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Aggregating health results...");
 
-        let results = ctx
-            .get::<Vec<ServiceHealth>>("health_results")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Health results not found".to_string(),
-            })?
-            .clone();
+        let results = ctx.require::<Vec<ServiceHealth>>("health_results")?.clone();
 
         // Determine overall status
         let overall_status = if results.iter().any(|h| h.status == HealthStatus::Unhealthy) {
@@ -211,11 +192,7 @@ impl Step for AggregateResultsStep {
 
         ctx.insert("health_report", report);
 
-        Ok(StepOutput::next("alert"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("AggregateResults")
+        Ok(Next::step("alert"))
     }
 }
 
@@ -225,13 +202,8 @@ struct AlertStep;
 
 #[async_trait]
 impl Step for AlertStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
-        let report =
-            ctx.get::<HealthReport>("health_report")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "Health report not found".to_string(),
-                })?;
+    async fn run(&self, ctx: &mut Context) -> StepResult {
+        let report = ctx.require::<HealthReport>("health_report")?;
 
         match &report.overall_status {
             HealthStatus::Unhealthy => {
@@ -248,11 +220,7 @@ impl Step for AlertStep {
             }
         }
 
-        Ok(StepOutput::next("report"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("Alert")
+        Ok(Next::step("report"))
     }
 }
 
@@ -262,13 +230,8 @@ struct ReportStep;
 
 #[async_trait]
 impl Step for ReportStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
-        let report =
-            ctx.get::<HealthReport>("health_report")
-                .ok_or_else(|| WorkflowError::StepError {
-                    step_name: self.name(),
-                    details: "Health report not found".to_string(),
-                })?;
+    async fn run(&self, ctx: &mut Context) -> StepResult {
+        let report = ctx.require::<HealthReport>("health_report")?;
 
         println!("\n╔══════════════════════════════════════════╗");
         println!("║         HEALTH CHECK REPORT              ║");
@@ -295,11 +258,7 @@ impl Step for ReportStep {
 
         println!("╚══════════════════════════════════════════╝");
 
-        Ok(StepOutput::done())
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("Report")
+        Ok(Next::Done)
     }
 }
 
@@ -320,7 +279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== Health Check Monitor ===\n");
 
-    match workflow.execute(&mut ctx).await {
+    match workflow.run(&mut ctx).await {
         Ok(_) => {
             println!("\nHealth check completed successfully!");
         }

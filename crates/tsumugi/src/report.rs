@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::time::Duration;
-use tsumugi_core::{StepName, WorkflowError};
+use tsumugi_core::StepName;
 
 /// How a step execution ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,8 +54,8 @@ impl StepRecord {
 
 /// Summary of a workflow execution.
 ///
-/// Returned by [`Workflow::execute`](crate::Workflow::execute) on success, and
-/// carried by [`ExecutionError`] on failure.
+/// Returned by [`Workflow::run`](crate::Workflow::run) on success, and
+/// carried by [`ExecutionError`](crate::ExecutionError) on failure.
 ///
 /// A step that runs more than once (for example in a loop) appears once per
 /// execution.
@@ -141,55 +141,6 @@ fn format_duration(duration: Duration) -> String {
         format!("{:.2}s", duration.as_secs_f64())
     } else {
         format!("{:.1}ms", duration.as_secs_f64() * 1000.0)
-    }
-}
-
-/// Error returned when a workflow execution fails.
-///
-/// Carries the [`WorkflowError`] that stopped the workflow, along with the
-/// [`ExecutionReport`] of the steps executed up to that point.
-#[derive(Debug)]
-pub struct ExecutionError {
-    error: WorkflowError,
-    report: ExecutionReport,
-}
-
-impl ExecutionError {
-    pub(crate) fn new(error: WorkflowError, report: ExecutionReport) -> Self {
-        Self { error, report }
-    }
-
-    /// Returns the error that stopped the workflow.
-    pub fn error(&self) -> &WorkflowError {
-        &self.error
-    }
-
-    /// Returns the report of the steps executed before the failure.
-    pub fn report(&self) -> &ExecutionReport {
-        &self.report
-    }
-
-    /// Splits into the error and the execution report.
-    pub fn into_parts(self) -> (WorkflowError, ExecutionReport) {
-        (self.error, self.report)
-    }
-}
-
-impl fmt::Display for ExecutionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.error, f)
-    }
-}
-
-impl std::error::Error for ExecutionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        std::error::Error::source(&self.error)
-    }
-}
-
-impl From<ExecutionError> for WorkflowError {
-    fn from(error: ExecutionError) -> Self {
-        error.error
     }
 }
 

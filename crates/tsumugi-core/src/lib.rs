@@ -1,35 +1,27 @@
-//! Core traits and types for tsumugi workflow engine.
+//! Core traits and types for the tsumugi workflow engine.
 //!
-//! This crate provides minimal abstractions without runtime dependencies.
-//! Library authors should depend on this crate to implement custom steps.
+//! This crate has no async runtime dependency. Depend on it to implement
+//! reusable steps in a library; applications should use the `tsumugi` crate,
+//! which re-exports everything here.
 //!
-//! # Core Types
+//! # Overview
 //!
-//! - [`Step`] - The core trait for workflow steps
-//! - [`StepOutput`] - Result of step execution
-//! - [`Context`] - Heterogeneous type storage for sharing data between steps
-//! - [`Key`] - Context key bound to a value type
-//! - [`WorkflowError`] - Error types for workflow execution
-//!
-//! # Closure Steps
-//!
-//! - [`FnStep`] - A step backed by a synchronous closure
-//! - [`AsyncFnStep`] - A step backed by an asynchronous closure
-//!
-//! # Step Configuration
-//!
-//! Retry policy, timeout and lifecycle hooks are optional methods on [`Step`]
-//! with sensible defaults. See the [`Step`] documentation for details.
+//! - [`Step`] - A unit of work operating on a workflow state
+//! - [`Next`] / [`StepResult`] - What happens after a step
+//! - [`StepError`] - Errors returned by steps, convertible from any error
+//! - [`RetryPolicy`] - How failed steps are retried
+//! - [`Context`] / [`Key`] - A general-purpose state holding values of any type
+//! - [`FnStep`] / [`AsyncFnStep`] - Steps backed by closures
 
 mod context;
 mod error;
 mod fn_step;
 mod step;
 
-pub use context::{Context, ContextKey, Key, KeyFor};
-pub use error::{HookType, WorkflowError};
+pub use context::{Context, Key, KeyFor, MissingValue};
+pub use error::{Failure, StepError};
 pub use fn_step::{AsyncFnStep, BoxFuture, FnStep};
-pub use step::{RetryPolicy, RetryPolicyError, Step, StepName, StepOutput, DEFAULT_TIMEOUT};
+pub use step::{Next, RetryPolicy, Step, StepName, StepResult, DEFAULT_TIMEOUT};
 
 /// Re-export of [`async_trait`](https://docs.rs/async-trait), used to implement [`Step`].
 pub use async_trait::async_trait;

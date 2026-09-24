@@ -16,7 +16,6 @@ categories = ["asynchronous", "rust-patterns"]
 tsumugi-core = { path = "crates/tsumugi-core", version = "0.1.0" }
 tokio = { version = "1", default-features = false }
 async-trait = "0.1"
-thiserror = "1.0"
 tracing = "0.1"
 
 [workspace.lints.rust]

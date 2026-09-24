@@ -88,7 +88,7 @@ struct LoadRequestStep;
 
 #[async_trait]
 impl Step for LoadRequestStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Loading notification request...");
 
         // In production, receive from queue or API
@@ -121,11 +121,7 @@ impl Step for LoadRequestStep {
 
         ctx.insert("notification_request", request);
 
-        Ok(StepOutput::next("render"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("LoadRequest")
+        Ok(Next::step("render"))
     }
 }
 
@@ -135,15 +131,10 @@ struct RenderTemplateStep;
 
 #[async_trait]
 impl Step for RenderTemplateStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Rendering notification template...");
 
-        let request = ctx
-            .get::<NotificationRequest>("notification_request")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Notification request not found".to_string(),
-            })?;
+        let request = ctx.require::<NotificationRequest>("notification_request")?;
 
         // Simple template rendering (in production, use handlebars or tera)
         let mut body = request.context.body.clone();
@@ -165,11 +156,7 @@ impl Step for RenderTemplateStep {
 
         ctx.insert("rendered_notification", rendered);
 
-        Ok(StepOutput::next("dispatch"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("RenderTemplate")
+        Ok(Next::step("dispatch"))
     }
 }
 
@@ -179,23 +166,15 @@ struct DispatchStep;
 
 #[async_trait]
 impl Step for DispatchStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
+    async fn run(&self, ctx: &mut Context) -> StepResult {
         println!("Dispatching notifications...");
 
         let request = ctx
-            .get::<NotificationRequest>("notification_request")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Request not found".to_string(),
-            })?
+            .require::<NotificationRequest>("notification_request")?
             .clone();
 
         let rendered = ctx
-            .get::<RenderedNotification>("rendered_notification")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Rendered notification not found".to_string(),
-            })?
+            .require::<RenderedNotification>("rendered_notification")?
             .clone();
 
         let mut results: Vec<DeliveryResult> = Vec::new();
@@ -213,17 +192,12 @@ impl Step for DispatchStep {
 
         ctx.insert("delivery_results", results);
 
-        Ok(StepOutput::next("report"))
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("Dispatch")
+        Ok(Next::step("report"))
     }
 
     fn retry_policy(&self) -> RetryPolicy {
         // 3 retries, starting at 1s, max 10s, multiplier 2
-        RetryPolicy::exponential_backoff(3, Duration::from_secs(1), Duration::from_secs(10), 2)
-            .unwrap_or(RetryPolicy::None)
+        RetryPolicy::exponential(3, Duration::from_secs(1)).max_delay(Duration::from_secs(10))
     }
 
     fn timeout(&self) -> Option<Duration> {
@@ -303,20 +277,11 @@ struct ReportStep;
 
 #[async_trait]
 impl Step for ReportStep {
-    async fn execute(&self, ctx: &mut Context) -> Result<StepOutput, WorkflowError> {
-        let request = ctx
-            .get::<NotificationRequest>("notification_request")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Request not found".to_string(),
-            })?;
+    async fn run(&self, ctx: &mut Context) -> StepResult {
+        let request = ctx.require::<NotificationRequest>("notification_request")?;
 
         let results = ctx
-            .get::<Vec<DeliveryResult>>("delivery_results")
-            .ok_or_else(|| WorkflowError::StepError {
-                step_name: self.name(),
-                details: "Delivery results not found".to_string(),
-            })?
+            .require::<Vec<DeliveryResult>>("delivery_results")?
             .clone();
 
         let all_succeeded = results.iter().all(|r| r.success);
@@ -363,11 +328,7 @@ impl Step for ReportStep {
 
         ctx.insert("delivery_report", report);
 
-        Ok(StepOutput::done())
-    }
-
-    fn name(&self) -> StepName {
-        StepName::new("Report")
+        Ok(Next::Done)
     }
 }
 
@@ -387,7 +348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== Notification Dispatch Workflow ===\n");
 
-    match workflow.execute(&mut ctx).await {
+    match workflow.run(&mut ctx).await {
         Ok(_) => {
             let report = ctx.get::<DeliveryReport>("delivery_report");
             if let Some(r) = report {
