@@ -17,8 +17,8 @@ tsumugi is different. It's a **library** you embed directly in your Rust applica
 |--|---------|---------|---------|---------|----------|----------------|
 | Type | Library | Platform | Framework | Platform | Platform | K8s CRD |
 | Language | Rust | Python | Python | Python | Go + SDKs | Go (YAML) |
-| DB required | No | Yes | No | No | Yes | No |
-| Server required | No | Yes | No | No | Yes | Yes (K8s) |
+| DB required | No | Yes | Yes | Yes | Yes | No |
+| Server required | No | Yes | Yes | Yes | Yes | Yes (K8s) |
 | UI | Mermaid export | Yes | Optional | Yes | Yes | Yes |
 
 ## Features
