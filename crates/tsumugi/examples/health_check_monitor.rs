@@ -10,22 +10,33 @@
 //! - Pre-deployment health verification in CI/CD
 //! - Scheduled health reports via cron
 
-#![allow(dead_code)]
-
 use std::time::Duration;
 use tsumugi::prelude::*;
 
+/// The state shared by all steps of the monitor. Each field is filled in by
+/// one step and required by the next.
+#[derive(Default)]
+struct MonitorState {
+    /// Set by the load step.
+    configs: Option<Vec<ServiceConfig>>,
+    /// Set by the check step, moved into the report by the aggregate step.
+    results: Option<Vec<ServiceHealth>>,
+    /// Set by the aggregate step.
+    report: Option<HealthReport>,
+}
+
 // Health check result for a single service
-#[derive(Debug, Clone)]
 struct ServiceHealth {
     name: String,
+    // Not read by this demo, which only prints the name.
+    #[allow(dead_code)]
     url: String,
     status: HealthStatus,
     response_time_ms: u64,
     message: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum HealthStatus {
     Healthy,
     Degraded,
@@ -33,7 +44,6 @@ enum HealthStatus {
 }
 
 // Aggregated health report
-#[derive(Debug, Clone)]
 struct HealthReport {
     timestamp: String,
     services: Vec<ServiceHealth>,
@@ -41,20 +51,20 @@ struct HealthReport {
 }
 
 // Service configuration
-#[derive(Debug, Clone)]
 struct ServiceConfig {
     name: String,
     url: String,
+    // Only used by the commented-out production request below.
+    #[allow(dead_code)]
     timeout_ms: u64,
 }
 
 // Step 1: Load service configurations
-#[derive(Debug)]
 struct LoadConfigStep;
 
 #[async_trait]
-impl Step for LoadConfigStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<MonitorState> for LoadConfigStep {
+    async fn run(&self, state: &mut MonitorState) -> StepResult {
         println!("Loading service configurations...");
 
         // In production, load from config file or environment
@@ -82,24 +92,24 @@ impl Step for LoadConfigStep {
         ];
 
         println!("  Loaded {} service configurations", services.len());
-        ctx.insert("service_configs", services);
+        state.configs = Some(services);
 
         Ok(Next::step("check_services"))
     }
 }
 
 // Step 2: Check all services (with simulated retries)
-#[derive(Debug)]
 struct CheckServicesStep;
 
 #[async_trait]
-impl Step for CheckServicesStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<MonitorState> for CheckServicesStep {
+    async fn run(&self, state: &mut MonitorState) -> StepResult {
         println!("Checking service health...");
 
-        let configs = ctx
-            .require::<Vec<ServiceConfig>>("service_configs")?
-            .clone();
+        let configs = state
+            .configs
+            .as_ref()
+            .ok_or("service configurations not loaded")?;
 
         let mut results: Vec<ServiceHealth> = Vec::new();
 
@@ -114,7 +124,7 @@ impl Step for CheckServicesStep {
             //     .await;
 
             // Simulated health check results
-            let health = simulate_health_check(&config);
+            let health = simulate_health_check(config);
             println!(
                 "  {} [{}]: {:?} ({}ms)",
                 health.name,
@@ -129,7 +139,7 @@ impl Step for CheckServicesStep {
             results.push(health);
         }
 
-        ctx.insert("health_results", results);
+        state.results = Some(results);
 
         Ok(Next::step("aggregate"))
     }
@@ -165,15 +175,14 @@ fn simulate_health_check(config: &ServiceConfig) -> ServiceHealth {
 }
 
 // Step 3: Aggregate results into report
-#[derive(Debug)]
 struct AggregateResultsStep;
 
 #[async_trait]
-impl Step for AggregateResultsStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<MonitorState> for AggregateResultsStep {
+    async fn run(&self, state: &mut MonitorState) -> StepResult {
         println!("Aggregating health results...");
 
-        let results = ctx.require::<Vec<ServiceHealth>>("health_results")?.clone();
+        let results = state.results.take().ok_or("health results missing")?;
 
         // Determine overall status
         let overall_status = if results.iter().any(|h| h.status == HealthStatus::Unhealthy) {
@@ -190,20 +199,19 @@ impl Step for AggregateResultsStep {
             overall_status,
         };
 
-        ctx.insert("health_report", report);
+        state.report = Some(report);
 
         Ok(Next::step("alert"))
     }
 }
 
 // Step 4: Send alerts if needed
-#[derive(Debug)]
 struct AlertStep;
 
 #[async_trait]
-impl Step for AlertStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
-        let report = ctx.require::<HealthReport>("health_report")?;
+impl Step<MonitorState> for AlertStep {
+    async fn run(&self, state: &mut MonitorState) -> StepResult {
+        let report = state.report.as_ref().ok_or("health report missing")?;
 
         match &report.overall_status {
             HealthStatus::Unhealthy => {
@@ -225,13 +233,12 @@ impl Step for AlertStep {
 }
 
 // Step 5: Generate report
-#[derive(Debug)]
 struct ReportStep;
 
 #[async_trait]
-impl Step for ReportStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
-        let report = ctx.require::<HealthReport>("health_report")?;
+impl Step<MonitorState> for ReportStep {
+    async fn run(&self, state: &mut MonitorState) -> StepResult {
+        let report = state.report.as_ref().ok_or("health report missing")?;
 
         println!("\n╔══════════════════════════════════════════╗");
         println!("║         HEALTH CHECK REPORT              ║");
@@ -266,20 +273,24 @@ impl Step for ReportStep {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let workflow = Workflow::builder()
+    let workflow = WorkflowBuilder::<MonitorState>::new()
         .add_step("load_config", LoadConfigStep)
+        .then(["check_services"])
         .add_step("check_services", CheckServicesStep)
+        .then(["aggregate"])
         .add_step("aggregate", AggregateResultsStep)
+        .then(["alert"])
         .add_step("alert", AlertStep)
+        .then(["report"])
         .add_step("report", ReportStep)
-        .start_with("load_config")
+        .terminal()
         .build()?;
 
-    let mut ctx = Context::new();
+    let mut state = MonitorState::default();
 
     println!("=== Health Check Monitor ===\n");
 
-    match workflow.run(&mut ctx).await {
+    match workflow.run(&mut state).await {
         Ok(_) => {
             println!("\nHealth check completed successfully!");
         }

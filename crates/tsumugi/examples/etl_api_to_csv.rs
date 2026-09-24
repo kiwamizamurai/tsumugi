@@ -23,19 +23,17 @@
 //!           path: output/*.csv
 //! ```
 
-#![allow(dead_code)]
-
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tsumugi::prelude::*;
 
 // Simulated API response data
-#[derive(Debug, Clone)]
 struct ApiResponse {
     users: Vec<User>,
+    // Part of the simulated payload, not used by this pipeline.
+    #[allow(dead_code)]
     fetched_at: String,
 }
 
-#[derive(Debug, Clone)]
 struct User {
     id: u64,
     name: String,
@@ -45,7 +43,6 @@ struct User {
 }
 
 // Transformed data ready for CSV
-#[derive(Debug, Clone)]
 struct CsvRecord {
     id: u64,
     name: String,
@@ -54,20 +51,28 @@ struct CsvRecord {
     status: String,
 }
 
-#[derive(Debug, Clone)]
 struct CsvOutput {
     headers: Vec<String>,
     records: Vec<CsvRecord>,
     filename: String,
 }
 
+/// The state shared by the pipeline steps. Each field is filled in by one
+/// step and read by a later one.
+#[derive(Default)]
+struct EtlState {
+    response: Option<ApiResponse>,
+    records: Option<Vec<CsvRecord>>,
+    department_stats: Option<BTreeMap<String, usize>>,
+    output: Option<CsvOutput>,
+}
+
 // Step 1: Fetch data from REST API
-#[derive(Debug)]
 struct FetchApiDataStep;
 
 #[async_trait]
-impl Step for FetchApiDataStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<EtlState> for FetchApiDataStep {
+    async fn run(&self, state: &mut EtlState) -> StepResult {
         println!("Fetching data from REST API...");
 
         // In production, use reqwest or similar:
@@ -112,24 +117,26 @@ impl Step for FetchApiDataStep {
         };
 
         println!("  Fetched {} users", response.users.len());
-        ctx.insert("api_response", response);
+        state.response = Some(response);
 
         Ok(Next::step("transform"))
     }
 }
 
 // Step 2: Transform data
-#[derive(Debug)]
 struct TransformDataStep;
 
 #[async_trait]
-impl Step for TransformDataStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<EtlState> for TransformDataStep {
+    async fn run(&self, state: &mut EtlState) -> StepResult {
         println!("Transforming data...");
 
-        let response = ctx.require::<ApiResponse>("api_response")?;
+        let response = state
+            .response
+            .as_ref()
+            .ok_or("API response has not been fetched")?;
 
-        // Transform: filter active users and map to CSV records
+        // Transform: map users to CSV records
         let records: Vec<CsvRecord> = response
             .users
             .iter()
@@ -145,27 +152,29 @@ impl Step for TransformDataStep {
         println!("  Transformed {} records", records.len());
 
         // Group by department for statistics
-        let mut dept_counts: HashMap<String, usize> = HashMap::new();
+        let mut dept_counts: BTreeMap<String, usize> = BTreeMap::new();
         for record in &records {
             *dept_counts.entry(record.department.clone()).or_insert(0) += 1;
         }
-        ctx.insert("department_stats", dept_counts);
-        ctx.insert("csv_records", records);
+        state.department_stats = Some(dept_counts);
+        state.records = Some(records);
 
         Ok(Next::step("generate_csv"))
     }
 }
 
 // Step 3: Generate CSV output
-#[derive(Debug)]
 struct GenerateCsvStep;
 
 #[async_trait]
-impl Step for GenerateCsvStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<EtlState> for GenerateCsvStep {
+    async fn run(&self, state: &mut EtlState) -> StepResult {
         println!("Generating CSV...");
 
-        let records = ctx.require::<Vec<CsvRecord>>("csv_records")?.clone();
+        let records = state
+            .records
+            .take()
+            .ok_or("CSV records have not been transformed")?;
 
         let output = CsvOutput {
             headers: vec![
@@ -188,24 +197,28 @@ impl Step for GenerateCsvStep {
         // }
 
         println!("  Generated: {}", output.filename);
-        ctx.insert("csv_output", output);
+        state.output = Some(output);
 
         Ok(Next::step("summary"))
     }
 }
 
 // Step 4: Print summary
-#[derive(Debug)]
 struct SummaryStep;
 
 #[async_trait]
-impl Step for SummaryStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<EtlState> for SummaryStep {
+    async fn run(&self, state: &mut EtlState) -> StepResult {
         println!("Generating summary...");
 
-        let output = ctx.require::<CsvOutput>("csv_output")?;
-
-        let stats = ctx.require::<HashMap<String, usize>>("department_stats")?;
+        let output = state
+            .output
+            .as_ref()
+            .ok_or("CSV output has not been generated")?;
+        let stats = state
+            .department_stats
+            .as_ref()
+            .ok_or("department statistics have not been computed")?;
 
         println!("\n=== ETL Summary ===");
         println!("Output file: {}", output.filename);
@@ -241,19 +254,22 @@ fn chrono_date() -> String {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let workflow = Workflow::builder()
+    let workflow = WorkflowBuilder::<EtlState>::new()
         .add_step("fetch", FetchApiDataStep)
+        .then(["transform"])
         .add_step("transform", TransformDataStep)
+        .then(["generate_csv"])
         .add_step("generate_csv", GenerateCsvStep)
+        .then(["summary"])
         .add_step("summary", SummaryStep)
-        .start_with("fetch")
+        .terminal()
         .build()?;
 
-    let mut ctx = Context::new();
+    let mut state = EtlState::default();
 
     println!("=== ETL Pipeline: REST API to CSV ===\n");
 
-    match workflow.run(&mut ctx).await {
+    match workflow.run(&mut state).await {
         Ok(_) => {
             println!("\nETL pipeline completed successfully!");
         }
