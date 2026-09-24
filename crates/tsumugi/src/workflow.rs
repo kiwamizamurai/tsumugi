@@ -6,7 +6,8 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{info, warn};
 use tsumugi_core::{
-    Context, Retryable, Step, StepConfig, StepName, StepOutput, WithTimeout, WorkflowError,
+    AsyncFnStep, BoxFuture, Context, FnStep, Retryable, Step, StepConfig, StepName, StepOutput,
+    WithTimeout, WorkflowError,
 };
 
 /// A workflow engine that executes a series of steps.
@@ -186,6 +187,73 @@ impl WorkflowBuilder {
             },
         );
         self
+    }
+
+    /// Adds a step backed by a synchronous closure.
+    ///
+    /// Shorthand for `add_step(name, FnStep::new(name, func))`. See [`FnStep`]
+    /// for details. To configure a timeout or retry policy, pass an [`FnStep`]
+    /// to [`add_configured`](Self::add_configured) instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tsumugi::prelude::*;
+    ///
+    /// let workflow = Workflow::builder()
+    ///     .add_fn("check", |ctx| {
+    ///         let age = ctx.get::<u32>("age").copied().unwrap_or_default();
+    ///         Ok(StepOutput::next(if age >= 18 { "adult" } else { "minor" }))
+    ///     })
+    ///     .add_fn("adult", |_ctx| Ok(StepOutput::done()))
+    ///     .add_fn("minor", |_ctx| Ok(StepOutput::done()))
+    ///     .start_with("check")
+    ///     .build();
+    ///
+    /// assert!(workflow.is_ok());
+    /// ```
+    pub fn add_fn<F>(self, name: impl Into<StepName>, func: F) -> Self
+    where
+        F: Fn(&mut Context) -> Result<StepOutput, WorkflowError> + Send + Sync + 'static,
+    {
+        let step_name = name.into();
+        let step = FnStep::new(step_name.clone(), func);
+        self.add_step(step_name, step)
+    }
+
+    /// Adds a step backed by an asynchronous closure.
+    ///
+    /// Shorthand for `add_step(name, AsyncFnStep::new(name, func))`. See
+    /// [`AsyncFnStep`] for details. To configure a timeout or retry policy, pass
+    /// an [`AsyncFnStep`] to [`add_configured`](Self::add_configured) instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tsumugi::prelude::*;
+    ///
+    /// let workflow = Workflow::builder()
+    ///     .add_async_fn("fetch", |ctx| {
+    ///         Box::pin(async move {
+    ///             ctx.insert("body", "fetched".to_string());
+    ///             Ok(StepOutput::done())
+    ///         })
+    ///     })
+    ///     .start_with("fetch")
+    ///     .build();
+    ///
+    /// assert!(workflow.is_ok());
+    /// ```
+    pub fn add_async_fn<F>(self, name: impl Into<StepName>, func: F) -> Self
+    where
+        F: for<'a> Fn(&'a mut Context) -> BoxFuture<'a, Result<StepOutput, WorkflowError>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let step_name = name.into();
+        let step = AsyncFnStep::new(step_name.clone(), func);
+        self.add_step(step_name, step)
     }
 
     /// Adds a retryable step with an explicit name.
