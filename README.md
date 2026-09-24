@@ -1,16 +1,31 @@
-# Tsumugi (紡)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo-light.svg">
+    <img src="assets/logo-light.svg" alt="tsumugi logo" width="120">
+  </picture>
+</p>
 
-[![Crates.io](https://img.shields.io/crates/v/tsumugi.svg)](https://crates.io/crates/tsumugi)
-[![Documentation](https://docs.rs/tsumugi/badge.svg)](https://docs.rs/tsumugi)
-[![CI](https://github.com/kiwamizamurai/tsumugi/actions/workflows/ci.yml/badge.svg)](https://github.com/kiwamizamurai/tsumugi/actions/workflows/ci.yml)
-[![License](https://img.shields.io/crates/l/tsumugi.svg)](LICENSE)
+<h1 align="center">Tsumugi (紡)</h1>
+
+<p align="center">
+  A lightweight, type-safe workflow engine you embed in your Rust application.
+</p>
+
+<p align="center">
+  <a href="https://crates.io/crates/tsumugi"><img src="https://img.shields.io/crates/v/tsumugi.svg" alt="Crates.io"></a>
+  <a href="https://github.com/kiwamizamurai/tsumugi/releases/latest"><img src="https://img.shields.io/github/v/release/kiwamizamurai/tsumugi" alt="GitHub Release"></a>
+  <a href="https://docs.rs/tsumugi"><img src="https://docs.rs/tsumugi/badge.svg" alt="Documentation"></a>
+  <a href="https://github.com/kiwamizamurai/tsumugi/actions/workflows/ci.yml"><img src="https://github.com/kiwamizamurai/tsumugi/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/kiwamizamurai/tsumugi" alt="License"></a>
+</p>
 
 > [!CAUTION]
 > tsumugi is still in beta and has not yet been published to crates.io. APIs may change before
 > the first crates.io release. In the meantime, you can depend on it directly via the git tag —
 > see [Installation](#installation).
 
-A lightweight, type-safe workflow engine you embed in your Rust application. The name "Tsumugi" (紡) means "to spin" or "to weave" in Japanese.
+The name "Tsumugi" (紡) means "to spin" or "to weave" in Japanese.
 
 ## Why tsumugi?
 
