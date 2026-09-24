@@ -47,14 +47,9 @@ fn build_workflow() -> Result<Workflow, WorkflowError> {
         })
         // Declared transitions are validated when the workflow is built.
         .then(["charge", "reject"])
-        .add_configured(
-            "charge",
-            charge,
-            StepConfig {
-                timeout: Some(Duration::from_secs(5)),
-                retry_policy: RetryPolicy::fixed(3, Duration::from_millis(50)),
-            },
-        )
+        .add_step("charge", charge)
+        .retry(RetryPolicy::fixed(3, Duration::from_millis(50)))
+        .timeout(Duration::from_secs(5))
         .then(["ship"])
         .add_fn("ship", |ctx| {
             let payment = ctx.get(PAYMENT_ID).cloned().unwrap_or_default();

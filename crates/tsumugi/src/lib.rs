@@ -47,10 +47,12 @@ pub use report::{ExecutionError, ExecutionReport, StepRecord, StepStatus};
 pub use workflow::{Workflow, WorkflowBuilder};
 
 /// Prelude for convenient imports.
+///
+/// Includes the [`async_trait`] attribute needed to implement [`Step`].
 pub mod prelude {
     pub use crate::{
-        AsyncFnStep, BoxFuture, Context, ContextKey, ExecutionError, ExecutionReport, FnStep,
-        HookType, Key, RetryPolicy, Retryable, Step, StepConfig, StepName, StepOutput, StepRecord,
-        StepStatus, WithHooks, WithTimeout, Workflow, WorkflowBuilder, WorkflowError,
+        async_trait, AsyncFnStep, BoxFuture, Context, ContextKey, ExecutionError, ExecutionReport,
+        FnStep, HookType, Key, RetryPolicy, Step, StepName, StepOutput, StepRecord, StepStatus,
+        Workflow, WorkflowBuilder, WorkflowError,
     };
 }

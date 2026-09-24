@@ -5,17 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "A lightweight workflow engine for Rust"
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "A lightweight, embeddable workflow engine for Rust"
+documentation = "https://docs.rs/tsumugi"
+readme = "../../README.md"
 
 [dependencies]
 tsumugi-core = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-tokio-test = "0.4"
-async-trait = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 tracing-subscriber = "0.3"
 
 [lints]

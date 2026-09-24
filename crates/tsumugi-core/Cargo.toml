@@ -5,7 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Core traits and types for tsumugi workflow engine"
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Core traits and types for the tsumugi workflow engine"
+documentation = "https://docs.rs/tsumugi-core"
+readme = "README.md"
 
 [dependencies]
 async-trait = { workspace = true }

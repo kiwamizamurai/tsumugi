@@ -50,14 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let workflow = Workflow::builder()
-        .add_configured(
-            "fetch",
-            fetch,
-            StepConfig {
-                timeout: Some(Duration::from_secs(5)),
-                retry_policy: RetryPolicy::fixed(2, Duration::from_millis(50)),
-            },
-        )
+        .add_step("fetch", fetch)
+        .retry(RetryPolicy::fixed(2, Duration::from_millis(50)))
+        .timeout(Duration::from_secs(5))
         // Sync closure steps for light, non-blocking logic.
         .add_fn("average", |ctx| {
             let scores = ctx.get::<Vec<u32>>("scores").cloned().unwrap_or_default();

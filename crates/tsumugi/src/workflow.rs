@@ -4,15 +4,11 @@ use crate::report::{ExecutionError, ExecutionReport, StepRecord, StepStatus};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::time::{Duration, Instant};
-use tokio::time::timeout;
 use tracing::{info, warn};
 use tsumugi_core::{
-    AsyncFnStep, BoxFuture, Context, FnStep, RetryPolicy, Retryable, Step, StepConfig, StepName,
-    StepOutput, WithTimeout, WorkflowError,
+    AsyncFnStep, BoxFuture, Context, FnStep, HookType, RetryPolicy, Step, StepName, StepOutput,
+    WorkflowError,
 };
-
-/// Timeout applied to steps registered without an explicit timeout.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A workflow engine that executes a series of steps.
 ///
@@ -31,7 +27,7 @@ pub struct Workflow {
 pub(crate) struct StepEntry {
     pub(crate) name: StepName,
     step: Box<dyn Step>,
-    timeout: Duration,
+    timeout: Option<Duration>,
     retry_policy: RetryPolicy,
     /// Declared successor steps. `None` means undeclared (any transition is
     /// allowed); `Some(vec![])` means the step is terminal.
@@ -141,7 +137,8 @@ impl Workflow {
         }
     }
 
-    /// Executes a single step, retrying according to its policy.
+    /// Executes a single step, retrying according to its policy, and runs its
+    /// lifecycle hooks.
     async fn execute_step(
         entry: &StepEntry,
         ctx: &mut Context,
@@ -150,42 +147,16 @@ impl Workflow {
         let max_retries = entry.retry_policy.max_retries();
         let mut attempts = 0;
 
-        loop {
+        let result = loop {
             attempts += 1;
-            let error = match timeout(entry.timeout, entry.step.execute(ctx)).await {
-                Ok(Ok(output)) => {
-                    info!("Step '{}' completed successfully", entry.name);
-                    let status = match &output {
-                        StepOutput::Continue(next) => StepStatus::Continued(next.clone()),
-                        StepOutput::Complete => StepStatus::Completed,
-                    };
-                    let record = StepRecord {
-                        name: entry.name.clone(),
-                        attempts,
-                        duration: started.elapsed(),
-                        status,
-                    };
-                    return (record, Ok(output));
-                }
-                Ok(Err(error)) => error,
-                Err(_) => WorkflowError::Timeout {
-                    step_name: entry.name.clone(),
-                },
+            let error = match Self::execute_attempt(entry, ctx).await {
+                Ok(output) => break Ok(output),
+                Err(error) => error,
             };
 
             let retries = attempts - 1;
             if retries >= max_retries {
-                warn!(
-                    "Step '{}' failed after {} retries: {}",
-                    entry.name, retries, error
-                );
-                let record = StepRecord {
-                    name: entry.name.clone(),
-                    attempts,
-                    duration: started.elapsed(),
-                    status: StepStatus::Failed,
-                };
-                return (record, Err(error));
+                break Err(error);
             }
 
             info!(
@@ -195,6 +166,69 @@ impl Workflow {
             if let Some(delay) = entry.retry_policy.delay_for_attempt(retries) {
                 tokio::time::sleep(delay).await;
             }
+        };
+
+        let result = match result {
+            Ok(output) => match entry.step.on_success(ctx).await {
+                Ok(()) => {
+                    info!("Step '{}' completed successfully", entry.name);
+                    Ok(output)
+                }
+                Err(hook_error) => {
+                    warn!(
+                        "Step '{}' on_success hook failed: {}",
+                        entry.name, hook_error
+                    );
+                    Err(WorkflowError::HookError {
+                        step_name: entry.name.clone(),
+                        hook_type: HookType::OnSuccess,
+                        details: hook_error.to_string(),
+                    })
+                }
+            },
+            Err(error) => {
+                warn!(
+                    "Step '{}' failed after {} attempt(s): {}",
+                    entry.name, attempts, error
+                );
+                if let Err(hook_error) = entry.step.on_failure(ctx, &error).await {
+                    warn!(
+                        "Step '{}' on_failure hook failed: {}",
+                        entry.name, hook_error
+                    );
+                }
+                Err(error)
+            }
+        };
+
+        let status = match &result {
+            Ok(StepOutput::Continue(next)) => StepStatus::Continued(next.clone()),
+            Ok(StepOutput::Complete) => StepStatus::Completed,
+            Err(_) => StepStatus::Failed,
+        };
+        let record = StepRecord {
+            name: entry.name.clone(),
+            attempts,
+            duration: started.elapsed(),
+            status,
+        };
+        (record, result)
+    }
+
+    /// Runs one attempt of a step, applying its timeout if any.
+    async fn execute_attempt(
+        entry: &StepEntry,
+        ctx: &mut Context,
+    ) -> Result<StepOutput, WorkflowError> {
+        match entry.timeout {
+            Some(limit) => tokio::time::timeout(limit, entry.step.execute(ctx))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(WorkflowError::Timeout {
+                        step_name: entry.name.clone(),
+                    })
+                }),
+            None => entry.step.execute(ctx).await,
         }
     }
 }
@@ -216,42 +250,47 @@ impl WorkflowBuilder {
         Self::default()
     }
 
-    fn push(
-        mut self,
-        name: StepName,
-        step: Box<dyn Step>,
-        timeout: Duration,
-        retry_policy: RetryPolicy,
-    ) -> Self {
+    /// Returns the most recently added step, recording a configuration error
+    /// if there is none.
+    fn last_step(&mut self, method: &str) -> Option<&mut StepEntry> {
+        if self.steps.is_empty() {
+            self.errors.push(WorkflowError::Configuration(format!(
+                "`{}` must be called after adding a step",
+                method
+            )));
+        }
+        self.steps.last_mut()
+    }
+
+    /// Adds a step under the given name.
+    ///
+    /// The step's own [`retry_policy`](Step::retry_policy) and
+    /// [`timeout`](Step::timeout) are used unless overridden with
+    /// [`retry`](Self::retry), [`timeout`](Self::timeout) or
+    /// [`no_timeout`](Self::no_timeout).
+    ///
+    /// The name identifies the step within the workflow: it is the target of
+    /// [`StepOutput::next`] and appears in logs, errors and reports.
+    pub fn add_step<S: Step + 'static>(mut self, name: impl Into<StepName>, step: S) -> Self {
+        let name = name.into();
         if self.steps.iter().any(|entry| entry.name == name) {
             self.errors.push(WorkflowError::DuplicateStep(name));
             return self;
         }
         self.steps.push(StepEntry {
             name,
-            step,
-            timeout,
-            retry_policy,
+            timeout: step.timeout(),
+            retry_policy: step.retry_policy(),
+            step: Box::new(step),
             transitions: None,
         });
         self
     }
 
-    /// Adds a step with an explicit name.
-    pub fn add_step<S: Step + 'static>(self, name: impl Into<StepName>, step: S) -> Self {
-        self.push(
-            name.into(),
-            Box::new(step),
-            DEFAULT_TIMEOUT,
-            RetryPolicy::None,
-        )
-    }
-
     /// Adds a step backed by a synchronous closure.
     ///
     /// Shorthand for `add_step(name, FnStep::new(name, func))`. See [`FnStep`]
-    /// for details. To configure a timeout or retry policy, pass an [`FnStep`]
-    /// to [`add_configured`](Self::add_configured) instead.
+    /// for details.
     ///
     /// # Examples
     ///
@@ -282,12 +321,12 @@ impl WorkflowBuilder {
     /// Adds a step backed by an asynchronous closure.
     ///
     /// Shorthand for `add_step(name, AsyncFnStep::new(name, func))`. See
-    /// [`AsyncFnStep`] for details. To configure a timeout or retry policy, pass
-    /// an [`AsyncFnStep`] to [`add_configured`](Self::add_configured) instead.
+    /// [`AsyncFnStep`] for details.
     ///
     /// # Examples
     ///
     /// ```
+    /// use std::time::Duration;
     /// use tsumugi::prelude::*;
     ///
     /// let workflow = Workflow::builder()
@@ -297,6 +336,8 @@ impl WorkflowBuilder {
     ///             Ok(StepOutput::done())
     ///         })
     ///     })
+    ///     .retry(RetryPolicy::fixed(3, Duration::from_millis(100)))
+    ///     .timeout(Duration::from_secs(5))
     ///     .start_with("fetch")
     ///     .build();
     ///
@@ -314,41 +355,46 @@ impl WorkflowBuilder {
         self.add_step(step_name, step)
     }
 
-    /// Adds a retryable step with an explicit name.
-    pub fn add_retryable<S: Retryable + 'static>(self, name: impl Into<StepName>, step: S) -> Self {
-        let retry_policy = step.retry_policy();
-        self.push(name.into(), Box::new(step), DEFAULT_TIMEOUT, retry_policy)
+    /// Sets the retry policy of the most recently added step, overriding
+    /// [`Step::retry_policy`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tsumugi::prelude::*;
+    ///
+    /// let workflow = Workflow::builder()
+    ///     .add_fn("flaky", |_ctx| Ok(StepOutput::done()))
+    ///     .retry(RetryPolicy::exponential(5, Duration::from_millis(100)))
+    ///     .start_with("flaky")
+    ///     .build();
+    ///
+    /// assert!(workflow.is_ok());
+    /// ```
+    pub fn retry(mut self, policy: RetryPolicy) -> Self {
+        if let Some(entry) = self.last_step("retry") {
+            entry.retry_policy = policy;
+        }
+        self
     }
 
-    /// Adds a step with custom timeout.
-    pub fn add_with_timeout<S: Step + 'static>(
-        self,
-        name: impl Into<StepName>,
-        step: S,
-        timeout: Duration,
-    ) -> Self {
-        self.push(name.into(), Box::new(step), timeout, RetryPolicy::None)
+    /// Sets the per-attempt timeout of the most recently added step,
+    /// overriding [`Step::timeout`].
+    pub fn timeout(mut self, duration: Duration) -> Self {
+        if let Some(entry) = self.last_step("timeout") {
+            entry.timeout = Some(duration);
+        }
+        self
     }
 
-    /// Adds a step that implements WithTimeout trait.
-    pub fn add_with_timeout_trait<S: WithTimeout + 'static>(
-        self,
-        name: impl Into<StepName>,
-        step: S,
-    ) -> Self {
-        let timeout = step.timeout();
-        self.push(name.into(), Box::new(step), timeout, RetryPolicy::None)
-    }
-
-    /// Adds a fully configured step.
-    pub fn add_configured<S: Step + 'static>(
-        self,
-        name: impl Into<StepName>,
-        step: S,
-        config: StepConfig,
-    ) -> Self {
-        let timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT);
-        self.push(name.into(), Box::new(step), timeout, config.retry_policy)
+    /// Disables the timeout of the most recently added step, overriding
+    /// [`Step::timeout`].
+    pub fn no_timeout(mut self) -> Self {
+        if let Some(entry) = self.last_step("no_timeout") {
+            entry.timeout = None;
+        }
+        self
     }
 
     /// Declares the steps the most recently added step may continue to.
@@ -388,14 +434,11 @@ impl WorkflowBuilder {
         I: IntoIterator,
         I::Item: Into<StepName>,
     {
-        match self.steps.last_mut() {
-            Some(entry) => entry
+        if let Some(entry) = self.last_step("then") {
+            entry
                 .transitions
                 .get_or_insert_with(Vec::new)
-                .extend(targets.into_iter().map(Into::into)),
-            None => self.errors.push(WorkflowError::Configuration(
-                "`then` must be called after adding a step".to_string(),
-            )),
+                .extend(targets.into_iter().map(Into::into));
         }
         self
     }
@@ -407,20 +450,18 @@ impl WorkflowBuilder {
     /// part in build-time validation and continuing from it at runtime fails
     /// with [`WorkflowError::UndeclaredTransition`].
     pub fn terminal(mut self) -> Self {
-        match self.steps.last_mut() {
-            Some(entry) => match &entry.transitions {
-                Some(targets) if !targets.is_empty() => {
-                    let message = format!(
-                        "step '{}' is declared terminal but has transitions",
-                        entry.name
-                    );
-                    self.errors.push(WorkflowError::Configuration(message));
-                }
+        let mut conflict = None;
+        if let Some(entry) = self.last_step("terminal") {
+            match &entry.transitions {
+                Some(targets) if !targets.is_empty() => conflict = Some(entry.name.clone()),
                 _ => entry.transitions = Some(Vec::new()),
-            },
-            None => self.errors.push(WorkflowError::Configuration(
-                "`terminal` must be called after adding a step".to_string(),
-            )),
+            }
+        }
+        if let Some(name) = conflict {
+            self.errors.push(WorkflowError::Configuration(format!(
+                "step '{}' is declared terminal but has transitions",
+                name
+            )));
         }
         self
     }
@@ -521,7 +562,7 @@ impl Workflow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
+    use tsumugi_core::async_trait;
 
     #[derive(Debug)]
     struct SuccessStep;
