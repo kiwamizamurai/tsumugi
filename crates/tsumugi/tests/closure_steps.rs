@@ -95,10 +95,10 @@ async fn test_closure_error_propagates() {
         .expect("valid workflow");
 
     let mut ctx = Context::new();
-    let errors = workflow.execute(&mut ctx).await.unwrap_err();
+    let err = workflow.execute(&mut ctx).await.unwrap_err();
 
     assert!(matches!(
-        &errors[0],
+        err.error(),
         WorkflowError::StepError { step_name, details }
             if step_name.as_str() == "fail" && details == "boom"
     ));
@@ -162,10 +162,10 @@ async fn test_async_closure_timeout() {
         .expect("valid workflow");
 
     let mut ctx = Context::new();
-    let errors = workflow.execute(&mut ctx).await.unwrap_err();
+    let err = workflow.execute(&mut ctx).await.unwrap_err();
 
     assert!(matches!(
-        &errors[0],
+        err.error(),
         WorkflowError::Timeout { step_name } if step_name.as_str() == "slow"
     ));
 }

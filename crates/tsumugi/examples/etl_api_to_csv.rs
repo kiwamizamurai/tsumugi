@@ -292,13 +292,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== ETL Pipeline: REST API to CSV ===\n");
 
     match workflow.execute(&mut ctx).await {
-        Ok(()) => {
+        Ok(_) => {
             println!("\nETL pipeline completed successfully!");
         }
-        Err(errors) => {
-            for error in errors {
-                eprintln!("ETL pipeline failed: {:?}", error);
-            }
+        Err(err) => {
+            eprintln!("ETL pipeline failed: {}", err);
+            eprintln!("{}", err.report());
             std::process::exit(1);
         }
     }

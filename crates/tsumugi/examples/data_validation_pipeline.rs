@@ -456,7 +456,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Data Validation Pipeline ===\n");
 
     match workflow.execute(&mut ctx).await {
-        Ok(()) => {
+        Ok(_) => {
             let result = ctx.get::<ValidationResult>("validation_result");
             if let Some(r) = result {
                 if r.passed {
@@ -467,10 +467,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Err(errors) => {
-            for error in errors {
-                eprintln!("Validation pipeline failed: {:?}", error);
-            }
+        Err(err) => {
+            eprintln!("Validation pipeline failed: {}", err);
+            eprintln!("{}", err.report());
             std::process::exit(1);
         }
     }

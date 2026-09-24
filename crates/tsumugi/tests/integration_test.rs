@@ -83,9 +83,9 @@ async fn test_step_not_found_error() {
     let result = workflow.execute(&mut ctx).await;
 
     assert!(result.is_err());
-    let errors = result.unwrap_err();
+    let err = result.unwrap_err();
     assert!(
-        matches!(&errors[0], WorkflowError::StepNotFound(name) if name.as_str() == "nonexistent_step")
+        matches!(err.error(), WorkflowError::StepNotFound(name) if name.as_str() == "nonexistent_step")
     );
 }
 
@@ -116,9 +116,9 @@ async fn test_timeout_error() {
     let result = workflow.execute(&mut ctx).await;
 
     assert!(result.is_err());
-    let errors = result.unwrap_err();
+    let err = result.unwrap_err();
     assert!(
-        matches!(&errors[0], WorkflowError::Timeout { step_name } if step_name.as_str() == "SlowStep")
+        matches!(err.error(), WorkflowError::Timeout { step_name } if step_name.as_str() == "slow")
     );
 }
 

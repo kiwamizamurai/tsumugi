@@ -49,6 +49,35 @@ pub enum WorkflowError {
     #[error("Invalid workflow configuration: {0}")]
     Configuration(String),
 
+    /// Two steps were registered under the same name.
+    #[error("Duplicate step name: {0}")]
+    DuplicateStep(StepName),
+
+    /// A step declares a transition to a step that is not registered.
+    #[error("Step '{from}' declares a transition to unknown step '{to}'")]
+    UnknownTransitionTarget {
+        /// The step declaring the transition.
+        from: StepName,
+        /// The missing target step.
+        to: StepName,
+    },
+
+    /// A step can never be reached from the start step.
+    ///
+    /// Only reported when every step reachable from the start step declares
+    /// its transitions, so that reachability can be determined.
+    #[error("Step '{0}' is unreachable from the start step")]
+    UnreachableStep(StepName),
+
+    /// A step continued to a step that is not among its declared transitions.
+    #[error("Step '{from}' continued to '{to}', which is not a declared transition")]
+    UndeclaredTransition {
+        /// The step that returned the transition.
+        from: StepName,
+        /// The requested next step.
+        to: StepName,
+    },
+
     /// A lifecycle hook failed.
     #[error("Hook '{hook_type}' failed in step '{step_name}': {details}")]
     HookError {

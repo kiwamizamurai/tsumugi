@@ -8,6 +8,7 @@
 //! - [`Step`] - The core trait for workflow steps
 //! - [`StepOutput`] - Result of step execution
 //! - [`Context`] - Heterogeneous type storage for sharing data between steps
+//! - [`Key`] - Context key bound to a value type
 //! - [`WorkflowError`] - Error types for workflow execution
 //!
 //! # Closure Steps
@@ -27,7 +28,7 @@ mod fn_step;
 mod step;
 mod traits;
 
-pub use context::{Context, ContextKey};
+pub use context::{Context, ContextKey, Key, KeyFor};
 pub use error::{HookType, WorkflowError};
 pub use fn_step::{AsyncFnStep, BoxFuture, FnStep};
 pub use step::{RetryPolicy, RetryPolicyError, Step, StepConfig, StepName, StepOutput};

@@ -72,7 +72,7 @@ impl Step for ScanDirectoryStep {
         // let entries = std::fs::read_dir("./input")?;
 
         // Simulated file discovery
-        let files = vec![
+        let files = [
             InputFile {
                 path: "./input/app-2024-01-01.json".to_string(),
                 size_bytes: 1024,
@@ -367,13 +367,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== File Processing Pipeline ===\n");
 
     match workflow.execute(&mut ctx).await {
-        Ok(()) => {
+        Ok(_) => {
             println!("\nPipeline completed successfully!");
         }
-        Err(errors) => {
-            for error in errors {
-                eprintln!("Pipeline failed: {:?}", error);
-            }
+        Err(err) => {
+            eprintln!("Pipeline failed: {}", err);
+            eprintln!("{}", err.report());
             std::process::exit(1);
         }
     }
