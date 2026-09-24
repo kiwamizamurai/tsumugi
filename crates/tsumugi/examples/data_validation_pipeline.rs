@@ -12,18 +12,24 @@
 //! - Configuration file validation
 //! - API request validation pipeline
 
-#![allow(dead_code)]
-
+use std::collections::HashSet;
 use tsumugi::prelude::*;
 
+/// The state shared by all steps of the pipeline.
+#[derive(Default)]
+struct ValidationState {
+    /// Set by the load step.
+    data: Option<ImportData>,
+    /// Accumulates the findings of every validation step.
+    result: ValidationResult,
+}
+
 // Input data to validate
-#[derive(Debug, Clone)]
 struct ImportData {
     products: Vec<Product>,
     categories: Vec<Category>,
 }
 
-#[derive(Debug, Clone)]
 struct Product {
     id: String,
     name: String,
@@ -32,7 +38,6 @@ struct Product {
     stock: i32,
 }
 
-#[derive(Debug, Clone)]
 struct Category {
     id: String,
     name: String,
@@ -40,20 +45,20 @@ struct Category {
 }
 
 // Validation result
-#[derive(Debug, Clone)]
 struct ValidationError {
     field: String,
     message: String,
+    // Not read by this demo, which reports errors and warnings separately.
+    #[allow(dead_code)]
     severity: Severity,
 }
 
-#[derive(Debug, Clone, PartialEq)]
 enum Severity {
     Error,
     Warning,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 struct ValidationResult {
     errors: Vec<ValidationError>,
     warnings: Vec<ValidationError>,
@@ -84,12 +89,11 @@ impl ValidationResult {
 }
 
 // Step 1: Load data
-#[derive(Debug)]
 struct LoadDataStep;
 
 #[async_trait]
-impl Step for LoadDataStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<ValidationState> for LoadDataStep {
+    async fn run(&self, state: &mut ValidationState) -> StepResult {
         println!("Loading import data...");
 
         // In production, load from file or API
@@ -151,23 +155,21 @@ impl Step for LoadDataStep {
             data.categories.len()
         );
 
-        ctx.insert("import_data", data);
-        ctx.insert("validation_result", ValidationResult::default());
+        state.data = Some(data);
 
         Ok(Next::step("schema_validation"))
     }
 }
 
 // Step 2: Schema validation
-#[derive(Debug)]
 struct SchemaValidationStep;
 
 #[async_trait]
-impl Step for SchemaValidationStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<ValidationState> for SchemaValidationStep {
+    async fn run(&self, state: &mut ValidationState) -> StepResult {
         println!("Running schema validation...");
 
-        let data = ctx.require::<ImportData>("import_data")?;
+        let data = state.data.as_ref().ok_or("import data not loaded")?;
 
         let mut result = ValidationResult::default();
 
@@ -213,27 +215,21 @@ impl Step for SchemaValidationStep {
         );
 
         // Merge with existing results
-        let mut existing = ctx
-            .get::<ValidationResult>("validation_result")
-            .cloned()
-            .unwrap_or_default();
-        existing.merge(result);
-        ctx.insert("validation_result", existing);
+        state.result.merge(result);
 
         Ok(Next::step("business_validation"))
     }
 }
 
 // Step 3: Business rule validation
-#[derive(Debug)]
 struct BusinessValidationStep;
 
 #[async_trait]
-impl Step for BusinessValidationStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<ValidationState> for BusinessValidationStep {
+    async fn run(&self, state: &mut ValidationState) -> StepResult {
         println!("Running business rule validation...");
 
-        let data = ctx.require::<ImportData>("import_data")?;
+        let data = state.data.as_ref().ok_or("import data not loaded")?;
 
         let mut result = ValidationResult::default();
 
@@ -279,37 +275,30 @@ impl Step for BusinessValidationStep {
             result.warnings.len()
         );
 
-        let mut existing = ctx
-            .get::<ValidationResult>("validation_result")
-            .cloned()
-            .unwrap_or_default();
-        existing.merge(result);
-        ctx.insert("validation_result", existing);
+        state.result.merge(result);
 
         Ok(Next::step("reference_validation"))
     }
 }
 
 // Step 4: Cross-reference validation
-#[derive(Debug)]
 struct ReferenceValidationStep;
 
 #[async_trait]
-impl Step for ReferenceValidationStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<ValidationState> for ReferenceValidationStep {
+    async fn run(&self, state: &mut ValidationState) -> StepResult {
         println!("Running reference validation...");
 
-        let data = ctx.require::<ImportData>("import_data")?;
+        let data = state.data.as_ref().ok_or("import data not loaded")?;
 
         let mut result = ValidationResult::default();
 
         // Build category lookup
-        let category_ids: std::collections::HashSet<_> =
-            data.categories.iter().map(|c| c.id.clone()).collect();
+        let category_ids: HashSet<&str> = data.categories.iter().map(|c| c.id.as_str()).collect();
 
         // Check product -> category references
         for product in &data.products {
-            if !category_ids.contains(&product.category_id) {
+            if !category_ids.contains(product.category_id.as_str()) {
                 result.add_error(
                     &format!("product.{}.category_id", product.id),
                     &format!("Category not found: {}", product.category_id),
@@ -320,7 +309,7 @@ impl Step for ReferenceValidationStep {
         // Check category -> parent references
         for category in &data.categories {
             if let Some(parent_id) = &category.parent_id {
-                if !category_ids.contains(parent_id) {
+                if !category_ids.contains(parent_id.as_str()) {
                     result.add_error(
                         &format!("category.{}.parent_id", category.id),
                         &format!("Parent category not found: {}", parent_id),
@@ -335,29 +324,19 @@ impl Step for ReferenceValidationStep {
             result.warnings.len()
         );
 
-        let mut existing = ctx
-            .get::<ValidationResult>("validation_result")
-            .cloned()
-            .unwrap_or_default();
-        existing.merge(result);
-        ctx.insert("validation_result", existing);
+        state.result.merge(result);
 
         Ok(Next::step("report"))
     }
 }
 
 // Step 5: Generate report
-#[derive(Debug)]
 struct ReportStep;
 
 #[async_trait]
-impl Step for ReportStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
-        let mut result = ctx
-            .get::<ValidationResult>("validation_result")
-            .cloned()
-            .unwrap_or_default();
-
+impl Step<ValidationState> for ReportStep {
+    async fn run(&self, state: &mut ValidationState) -> StepResult {
+        let result = &mut state.result;
         result.passed = result.errors.is_empty();
 
         println!("\n╔══════════════════════════════════════════════════════╗");
@@ -396,8 +375,6 @@ impl Step for ReportStep {
 
         println!("╚══════════════════════════════════════════════════════╝");
 
-        ctx.insert("validation_result", result);
-
         Ok(Next::Done)
     }
 }
@@ -406,29 +383,30 @@ impl Step for ReportStep {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let workflow = Workflow::builder()
+    let workflow = WorkflowBuilder::<ValidationState>::new()
         .add_step("load", LoadDataStep)
+        .then(["schema_validation"])
         .add_step("schema_validation", SchemaValidationStep)
+        .then(["business_validation"])
         .add_step("business_validation", BusinessValidationStep)
+        .then(["reference_validation"])
         .add_step("reference_validation", ReferenceValidationStep)
+        .then(["report"])
         .add_step("report", ReportStep)
-        .start_with("load")
+        .terminal()
         .build()?;
 
-    let mut ctx = Context::new();
+    let mut state = ValidationState::default();
 
     println!("=== Data Validation Pipeline ===\n");
 
-    match workflow.run(&mut ctx).await {
+    match workflow.run(&mut state).await {
         Ok(_) => {
-            let result = ctx.get::<ValidationResult>("validation_result");
-            if let Some(r) = result {
-                if r.passed {
-                    println!("\nValidation passed! Data is ready for import.");
-                } else {
-                    println!("\nValidation failed! Please fix errors before import.");
-                    std::process::exit(1);
-                }
+            if state.result.passed {
+                println!("\nValidation passed! Data is ready for import.");
+            } else {
+                println!("\nValidation failed! Please fix errors before import.");
+                std::process::exit(1);
             }
         }
         Err(err) => {
