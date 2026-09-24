@@ -1,80 +1,83 @@
 //! User scoring workflow demonstrating data processing pipeline.
 //!
 //! Demonstrates:
-//! - Heterogeneous context (each type stored directly)
+//! - A dedicated state struct filled in step by step
 //! - Data validation
 //! - Conditional logic based on computed values
 
 use std::collections::HashMap;
 use tsumugi::prelude::*;
 
-// Data structures - stored directly without wrapper enum
-#[derive(Debug, Clone)]
+// Data structures
+#[derive(Debug)]
 struct UserData {
     id: u64,
     name: String,
     age: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct ProcessedData {
-    user: UserData,
     score: f64,
     category: String,
 }
 
+/// The state shared by all steps. Each field is produced by a step, so it is
+/// `None` until that step has run.
+#[derive(Default)]
+struct ScoringState {
+    user: Option<UserData>,
+    scores: Option<HashMap<u64, f64>>,
+    processed: Option<ProcessedData>,
+}
+
 // Step 1: Load user data
-#[derive(Debug)]
 struct UserDataLoadStep;
 
 #[async_trait]
-impl Step for UserDataLoadStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<ScoringState> for UserDataLoadStep {
+    async fn run(&self, state: &mut ScoringState) -> StepResult {
         println!("Loading user data...");
 
-        let user = UserData {
+        state.user = Some(UserData {
             id: 1,
             name: "John Doe".to_string(),
             age: 30,
-        };
-        ctx.insert("user_data", user);
+        });
 
         Ok(Next::step("load_scores"))
     }
 }
 
 // Step 2: Load scores
-#[derive(Debug)]
 struct ScoresLoadStep;
 
 #[async_trait]
-impl Step for ScoresLoadStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<ScoringState> for ScoresLoadStep {
+    async fn run(&self, state: &mut ScoringState) -> StepResult {
         println!("Loading scores...");
 
-        let scores: HashMap<u64, f64> = HashMap::from([(1, 85.5), (2, 92.0), (3, 78.3)]);
-        ctx.insert("scores", scores);
+        state.scores = Some(HashMap::from([(1, 85.5), (2, 92.0), (3, 78.3)]));
 
         Ok(Next::step("validate"))
     }
 }
 
 // Step 3: Validate data
-#[derive(Debug)]
 struct DataValidationStep;
 
 #[async_trait]
-impl Step for DataValidationStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<ScoringState> for DataValidationStep {
+    async fn run(&self, state: &mut ScoringState) -> StepResult {
         println!("Validating data...");
 
-        let user = ctx.require::<UserData>("user_data")?;
+        let user = state.user.as_ref().ok_or("User data not loaded")?;
 
         if user.age < 18 {
             return Err("User must be 18 or older".into());
         }
 
-        let scores = ctx.require::<HashMap<u64, f64>>("scores")?;
+        let scores = state.scores.as_ref().ok_or("Scores not loaded")?;
 
         if !scores.contains_key(&user.id) {
             return Err("Score not found for user".into());
@@ -85,53 +88,47 @@ impl Step for DataValidationStep {
 }
 
 // Step 4: Process data
-#[derive(Debug)]
 struct DataProcessingStep;
 
 #[async_trait]
-impl Step for DataProcessingStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<ScoringState> for DataProcessingStep {
+    async fn run(&self, state: &mut ScoringState) -> StepResult {
         println!("Processing data...");
 
-        let user = ctx.require::<UserData>("user_data")?.clone();
+        let user = state.user.as_ref().ok_or("User data not loaded")?;
+        let scores = state.scores.as_ref().ok_or("Scores not loaded")?;
 
-        let scores = ctx.require::<HashMap<u64, f64>>("scores")?;
+        let score = *scores.get(&user.id).ok_or("Score not found for user")?;
 
-        let score = scores
-            .get(&user.id)
-            .ok_or_else(|| "Score not found for user".to_string())?;
-
-        let category = match *score {
+        let category = match score {
             s if s >= 90.0 => "A",
             s if s >= 80.0 => "B",
             s if s >= 70.0 => "C",
             _ => "D",
         };
 
-        let processed = ProcessedData {
-            user,
-            score: *score,
+        state.processed = Some(ProcessedData {
+            score,
             category: category.to_string(),
-        };
+        });
 
-        ctx.insert("processed_data", processed);
         Ok(Next::step("notify"))
     }
 }
 
 // Step 5: Notification
-#[derive(Debug)]
 struct NotificationStep;
 
 #[async_trait]
-impl Step for NotificationStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
-        let processed = ctx.require::<ProcessedData>("processed_data")?;
+impl Step<ScoringState> for NotificationStep {
+    async fn run(&self, state: &mut ScoringState) -> StepResult {
+        let user = state.user.as_ref().ok_or("User data not loaded")?;
+        let processed = state.processed.as_ref().ok_or("Data not processed")?;
 
         if processed.score < 80.0 {
             println!(
                 "Notification: {} scored {} (Category {})",
-                processed.user.name, processed.score, processed.category
+                user.name, processed.score, processed.category
             );
         }
 
@@ -143,26 +140,30 @@ impl Step for NotificationStep {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let workflow = Workflow::builder()
+    let workflow = WorkflowBuilder::<ScoringState>::new()
         .add_step("load_user", UserDataLoadStep)
+        .then(["load_scores"])
         .add_step("load_scores", ScoresLoadStep)
+        .then(["validate"])
         .add_step("validate", DataValidationStep)
+        .then(["process"])
         .add_step("process", DataProcessingStep)
+        .then(["notify"])
         .add_step("notify", NotificationStep)
-        .start_with("load_user")
+        .terminal()
         .build()?;
 
-    let mut ctx = Context::new();
+    let mut state = ScoringState::default();
 
-    match workflow.run(&mut ctx).await {
+    match workflow.run(&mut state).await {
         Ok(_) => {
-            if let Some(processed) = ctx.get::<ProcessedData>("processed_data") {
-                println!("\nWorkflow completed successfully");
-                println!(
-                    "Result: {} - Score: {}, Category: {}",
-                    processed.user.name, processed.score, processed.category
-                );
-            }
+            let user = state.user.as_ref().ok_or("User data not loaded")?;
+            let processed = state.processed.as_ref().ok_or("Data not processed")?;
+            println!("\nWorkflow completed successfully");
+            println!(
+                "Result: {} - Score: {}, Category: {}",
+                user.name, processed.score, processed.category
+            );
         }
         Err(err) => {
             eprintln!("Workflow failed: {}", err);
