@@ -12,6 +12,7 @@
 //! - System status updates
 //! - Scheduled report delivery
 
+// Some fields and variants only illustrate a realistic data model.
 #![allow(dead_code)]
 
 use std::time::Duration;
@@ -75,20 +76,28 @@ struct DeliveryResult {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 struct DeliveryReport {
     notification_id: String,
     results: Vec<DeliveryResult>,
     all_succeeded: bool,
 }
 
+/// The state shared by all steps of the workflow.
+#[derive(Default)]
+struct Dispatch {
+    request: Option<NotificationRequest>,
+    rendered: Option<RenderedNotification>,
+    deliveries: Vec<DeliveryResult>,
+    report: Option<DeliveryReport>,
+}
+
 // Step 1: Load notification request
-#[derive(Debug)]
 struct LoadRequestStep;
 
 #[async_trait]
-impl Step for LoadRequestStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<Dispatch> for LoadRequestStep {
+    async fn run(&self, state: &mut Dispatch) -> StepResult {
         println!("Loading notification request...");
 
         // In production, receive from queue or API
@@ -119,22 +128,24 @@ impl Step for LoadRequestStep {
         println!("  Channels: {:?}", request.channels);
         println!("  Priority: {:?}", request.priority);
 
-        ctx.insert("notification_request", request);
+        state.request = Some(request);
 
         Ok(Next::step("render"))
     }
 }
 
 // Step 2: Render template
-#[derive(Debug)]
 struct RenderTemplateStep;
 
 #[async_trait]
-impl Step for RenderTemplateStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<Dispatch> for RenderTemplateStep {
+    async fn run(&self, state: &mut Dispatch) -> StepResult {
         println!("Rendering notification template...");
 
-        let request = ctx.require::<NotificationRequest>("notification_request")?;
+        let request = state
+            .request
+            .as_ref()
+            .ok_or("notification request not loaded")?;
 
         // Simple template rendering (in production, use handlebars or tera)
         let mut body = request.context.body.clone();
@@ -144,43 +155,40 @@ impl Step for RenderTemplateStep {
 
         let rendered = RenderedNotification {
             subject: request.context.subject.clone(),
-            body: body.clone(),
             html_body: Some(format!(
                 "<html><body><h1>{}</h1><p>{}</p></body></html>",
                 request.context.subject, body
             )),
+            body,
         };
 
         println!("  Subject: {}", rendered.subject);
         println!("  Body: {}", rendered.body);
 
-        ctx.insert("rendered_notification", rendered);
+        state.rendered = Some(rendered);
 
         Ok(Next::step("dispatch"))
     }
 }
 
 // Step 3: Dispatch to all channels
-#[derive(Debug)]
 struct DispatchStep;
 
 #[async_trait]
-impl Step for DispatchStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<Dispatch> for DispatchStep {
+    async fn run(&self, state: &mut Dispatch) -> StepResult {
         println!("Dispatching notifications...");
 
-        let request = ctx
-            .require::<NotificationRequest>("notification_request")?
-            .clone();
+        let request = state
+            .request
+            .as_ref()
+            .ok_or("notification request not loaded")?;
+        let rendered = state.rendered.as_ref().ok_or("notification not rendered")?;
 
-        let rendered = ctx
-            .require::<RenderedNotification>("rendered_notification")?
-            .clone();
-
-        let mut results: Vec<DeliveryResult> = Vec::new();
+        let mut results = Vec::new();
 
         for channel in &request.channels {
-            let result = dispatch_to_channel(channel, &request.recipient, &rendered);
+            let result = dispatch_to_channel(channel, &request.recipient, rendered);
             println!(
                 "  {} {:?} -> {}",
                 if result.success { "[OK]" } else { "[FAIL]" },
@@ -190,7 +198,7 @@ impl Step for DispatchStep {
             results.push(result);
         }
 
-        ctx.insert("delivery_results", results);
+        state.deliveries = results;
 
         Ok(Next::step("report"))
     }
@@ -272,23 +280,22 @@ fn dispatch_to_channel(
 }
 
 // Step 4: Generate delivery report
-#[derive(Debug)]
 struct ReportStep;
 
 #[async_trait]
-impl Step for ReportStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
-        let request = ctx.require::<NotificationRequest>("notification_request")?;
+impl Step<Dispatch> for ReportStep {
+    async fn run(&self, state: &mut Dispatch) -> StepResult {
+        let request = state
+            .request
+            .as_ref()
+            .ok_or("notification request not loaded")?;
 
-        let results = ctx
-            .require::<Vec<DeliveryResult>>("delivery_results")?
-            .clone();
-
+        let results = std::mem::take(&mut state.deliveries);
         let all_succeeded = results.iter().all(|r| r.success);
 
         let report = DeliveryReport {
             notification_id: request.id.clone(),
-            results: results.clone(),
+            results,
             all_succeeded,
         };
 
@@ -301,7 +308,7 @@ impl Step for ReportStep {
         );
         println!(
             "│ Status: {}                               │",
-            if all_succeeded {
+            if report.all_succeeded {
                 "ALL DELIVERED"
             } else {
                 "PARTIAL FAIL "
@@ -309,7 +316,7 @@ impl Step for ReportStep {
         );
         println!("├─────────────────────────────────────────────────┤");
 
-        for result in &results {
+        for result in &report.results {
             let status = if result.success { "OK  " } else { "FAIL" };
             let channel = format!("{:?}", result.channel);
             println!(
@@ -326,7 +333,7 @@ impl Step for ReportStep {
 
         println!("└─────────────────────────────────────────────────┘");
 
-        ctx.insert("delivery_report", report);
+        state.report = Some(report);
 
         Ok(Next::Done)
     }
@@ -336,35 +343,33 @@ impl Step for ReportStep {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let workflow = Workflow::builder()
+    let workflow = WorkflowBuilder::<Dispatch>::new()
         .add_step("load", LoadRequestStep)
+        .then(["render"])
         .add_step("render", RenderTemplateStep)
+        .then(["dispatch"])
         .add_step("dispatch", DispatchStep)
+        .then(["report"])
         .add_step("report", ReportStep)
-        .start_with("load")
+        .terminal()
         .build()?;
 
-    let mut ctx = Context::new();
+    let mut state = Dispatch::default();
 
     println!("=== Notification Dispatch Workflow ===\n");
 
-    match workflow.run(&mut ctx).await {
-        Ok(_) => {
-            let report = ctx.get::<DeliveryReport>("delivery_report");
-            if let Some(r) = report {
-                if r.all_succeeded {
-                    println!("\nAll notifications delivered successfully!");
-                } else {
-                    println!("\nSome notifications failed to deliver.");
-                    std::process::exit(1);
-                }
-            }
-        }
-        Err(err) => {
-            eprintln!("Notification workflow failed: {}", err);
-            eprintln!("{}", err.report());
-            std::process::exit(1);
-        }
+    if let Err(err) = workflow.run(&mut state).await {
+        eprintln!("Notification workflow failed: {}", err);
+        eprintln!("{}", err.report());
+        std::process::exit(1);
+    }
+
+    let report = state.report.ok_or("workflow produced no delivery report")?;
+    if report.all_succeeded {
+        println!("\nAll notifications delivered successfully!");
+    } else {
+        println!("\nSome notifications failed to deliver.");
+        std::process::exit(1);
     }
 
     Ok(())
