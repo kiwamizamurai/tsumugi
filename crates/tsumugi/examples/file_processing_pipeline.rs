@@ -12,20 +12,20 @@
 //! - Batch report generation
 //! - File migration tools
 
+// Some fields and variants exist only to make the simulated data realistic.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tsumugi::prelude::*;
 
 // Input file representation
-#[derive(Debug, Clone)]
 struct InputFile {
     path: String,
     size_bytes: u64,
     file_type: FileType,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(PartialEq)]
 enum FileType {
     Json,
     Csv,
@@ -33,7 +33,6 @@ enum FileType {
 }
 
 // Parsed log entry
-#[derive(Debug, Clone)]
 struct LogEntry {
     timestamp: String,
     level: String,
@@ -42,29 +41,51 @@ struct LogEntry {
 }
 
 // Processing statistics
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 struct ProcessingStats {
     files_processed: usize,
     entries_parsed: usize,
     errors_count: usize,
-    by_level: HashMap<String, usize>,
+    by_level: BTreeMap<String, usize>,
 }
 
 // Output report
-#[derive(Debug, Clone)]
 struct ProcessingReport {
     stats: ProcessingStats,
     output_file: String,
     entries: Vec<LogEntry>,
 }
 
+/// The state shared by the pipeline steps. `filter_level` is configured up
+/// front; the other fields are filled in by the steps as the pipeline runs.
+struct PipelineState {
+    filter_level: String,
+    input_files: Option<Vec<InputFile>>,
+    log_entries: Option<Vec<LogEntry>>,
+    stats: Option<ProcessingStats>,
+    filtered_entries: Option<Vec<LogEntry>>,
+    report: Option<ProcessingReport>,
+}
+
+impl PipelineState {
+    fn new(filter_level: impl Into<String>) -> Self {
+        Self {
+            filter_level: filter_level.into(),
+            input_files: None,
+            log_entries: None,
+            stats: None,
+            filtered_entries: None,
+            report: None,
+        }
+    }
+}
+
 // Step 1: Scan input directory
-#[derive(Debug)]
 struct ScanDirectoryStep;
 
 #[async_trait]
-impl Step for ScanDirectoryStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<PipelineState> for ScanDirectoryStep {
+    async fn run(&self, state: &mut PipelineState) -> StepResult {
         println!("Scanning input directory...");
 
         // In production, use std::fs::read_dir
@@ -94,35 +115,37 @@ impl Step for ScanDirectoryStep {
             },
         ];
 
+        let total = files.len();
         let json_files: Vec<_> = files
-            .iter()
+            .into_iter()
             .filter(|f| f.file_type == FileType::Json)
-            .cloned()
             .collect();
 
-        println!("  Found {} files ({} JSON)", files.len(), json_files.len());
+        println!("  Found {} files ({} JSON)", total, json_files.len());
 
-        ctx.insert("input_files", json_files);
+        state.input_files = Some(json_files);
 
         Ok(Next::step("parse"))
     }
 }
 
 // Step 2: Parse files
-#[derive(Debug)]
 struct ParseFilesStep;
 
 #[async_trait]
-impl Step for ParseFilesStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<PipelineState> for ParseFilesStep {
+    async fn run(&self, state: &mut PipelineState) -> StepResult {
         println!("Parsing files...");
 
-        let files = ctx.require::<Vec<InputFile>>("input_files")?.clone();
+        let files = state
+            .input_files
+            .as_ref()
+            .ok_or("input files have not been scanned")?;
 
         let mut all_entries: Vec<LogEntry> = Vec::new();
         let mut stats = ProcessingStats::default();
 
-        for file in &files {
+        for file in files {
             println!("  Processing: {}", file.path);
 
             // In production, read and parse actual files:
@@ -146,8 +169,8 @@ impl Step for ParseFilesStep {
             stats.entries_parsed, stats.files_processed
         );
 
-        ctx.insert("log_entries", all_entries);
-        ctx.insert("stats", stats);
+        state.log_entries = Some(all_entries);
+        state.stats = Some(stats);
 
         Ok(Next::step("filter"))
     }
@@ -155,7 +178,7 @@ impl Step for ParseFilesStep {
 
 // Simulate file parsing
 fn simulate_parse_file(file: &InputFile) -> Vec<LogEntry> {
-    let source = file.path.clone();
+    let source = &file.path;
     vec![
         LogEntry {
             timestamp: "2024-01-15T10:00:00Z".to_string(),
@@ -179,27 +202,23 @@ fn simulate_parse_file(file: &InputFile) -> Vec<LogEntry> {
             timestamp: "2024-01-15T10:00:03Z".to_string(),
             level: "ERROR".to_string(),
             message: "Failed to connect to external service".to_string(),
-            source_file: source,
+            source_file: source.clone(),
         },
     ]
 }
 
 // Step 3: Filter and transform
-#[derive(Debug)]
 struct FilterEntriesStep;
 
 #[async_trait]
-impl Step for FilterEntriesStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<PipelineState> for FilterEntriesStep {
+    async fn run(&self, state: &mut PipelineState) -> StepResult {
         println!("Filtering entries...");
 
-        let entries = ctx.require::<Vec<LogEntry>>("log_entries")?.clone();
-
-        // Filter configuration (could come from context)
-        let min_level = ctx
-            .get::<String>("filter_level")
-            .map(|s| s.as_str())
-            .unwrap_or("WARN");
+        let entries = state
+            .log_entries
+            .take()
+            .ok_or("log entries have not been parsed")?;
 
         let filtered: Vec<_> = entries
             .into_iter()
@@ -209,27 +228,31 @@ impl Step for FilterEntriesStep {
         println!(
             "  Filtered to {} entries (level >= {})",
             filtered.len(),
-            min_level
+            state.filter_level
         );
 
-        ctx.insert("filtered_entries", filtered);
+        state.filtered_entries = Some(filtered);
 
         Ok(Next::step("write_output"))
     }
 }
 
 // Step 4: Write output
-#[derive(Debug)]
 struct WriteOutputStep;
 
 #[async_trait]
-impl Step for WriteOutputStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
+impl Step<PipelineState> for WriteOutputStep {
+    async fn run(&self, state: &mut PipelineState) -> StepResult {
         println!("Writing output...");
 
-        let entries = ctx.require::<Vec<LogEntry>>("filtered_entries")?.clone();
-
-        let stats = ctx.require::<ProcessingStats>("stats")?.clone();
+        let entries = state
+            .filtered_entries
+            .take()
+            .ok_or("log entries have not been filtered")?;
+        let stats = state
+            .stats
+            .take()
+            .ok_or("processing statistics are missing")?;
 
         let output_file = "./output/aggregated_logs.csv".to_string();
 
@@ -241,26 +264,26 @@ impl Step for WriteOutputStep {
 
         println!("  Output: {}", output_file);
 
-        let report = ProcessingReport {
+        state.report = Some(ProcessingReport {
             stats,
             output_file,
             entries,
-        };
-
-        ctx.insert("report", report);
+        });
 
         Ok(Next::step("summary"))
     }
 }
 
 // Step 5: Print summary
-#[derive(Debug)]
 struct SummaryStep;
 
 #[async_trait]
-impl Step for SummaryStep {
-    async fn run(&self, ctx: &mut Context) -> StepResult {
-        let report = ctx.require::<ProcessingReport>("report")?;
+impl Step<PipelineState> for SummaryStep {
+    async fn run(&self, state: &mut PipelineState) -> StepResult {
+        let report = state
+            .report
+            .as_ref()
+            .ok_or("processing report has not been written")?;
 
         println!("\n┌─────────────────────────────────────────┐");
         println!("│     FILE PROCESSING SUMMARY             │");
@@ -301,22 +324,24 @@ impl Step for SummaryStep {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let workflow = Workflow::builder()
+    let workflow = WorkflowBuilder::<PipelineState>::new()
         .add_step("scan", ScanDirectoryStep)
+        .then(["parse"])
         .add_step("parse", ParseFilesStep)
+        .then(["filter"])
         .add_step("filter", FilterEntriesStep)
+        .then(["write_output"])
         .add_step("write_output", WriteOutputStep)
+        .then(["summary"])
         .add_step("summary", SummaryStep)
-        .start_with("scan")
+        .terminal()
         .build()?;
 
-    let mut ctx = Context::new();
-    // Optional: set filter level
-    ctx.insert("filter_level", "WARN".to_string());
+    let mut state = PipelineState::new("WARN");
 
     println!("=== File Processing Pipeline ===\n");
 
-    match workflow.run(&mut ctx).await {
+    match workflow.run(&mut state).await {
         Ok(_) => {
             println!("\nPipeline completed successfully!");
         }
